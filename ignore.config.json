@@ -1,0 +1,13 @@
+[
+  "node_modules",
+  ".git",
+  "vendor",
+  "dist",
+  "build",
+  ".next",
+  ".idea",
+  "coverage",
+  "tmp",
+  "*.log",
+  ".DS_Store"
+]

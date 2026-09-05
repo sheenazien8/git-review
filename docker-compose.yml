@@ -1,0 +1,13 @@
+services:
+  web:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: git-review
+    container_name: git-review
+    restart: unless-stopped
+    ports:
+      - "3456:3000"
+    volumes:
+      - /mnt/storage:/mnt/storage
+      - /DATA:/DATA
