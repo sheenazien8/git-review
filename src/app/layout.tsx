@@ -40,13 +40,18 @@ const themeScript = `
 })()
 `
 
+import AuthHeader from "@/components/auth-header"
+
 export default function RootLayout({ children }: { children: React.ReactNode }) {
   return (
     <html lang="en" className={`${geistSans.variable} ${geistMono.variable} h-full antialiased`} suppressHydrationWarning>
       <head>
         <script dangerouslySetInnerHTML={{ __html: themeScript }} />
       </head>
-      <body className="min-h-full flex flex-col" suppressHydrationWarning>{children}</body>
+      <body className="min-h-full flex flex-col" suppressHydrationWarning>
+        <AuthHeader />
+        {children}
+      </body>
     </html>
   )
 }
