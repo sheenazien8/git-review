@@ -8,6 +8,9 @@ services:
     restart: unless-stopped
     ports:
       - "3456:3000"
+    env_file: .env.local
+    environment:
+      - NODE_ENV=production
     volumes:
       - /mnt/storage:/mnt/storage
       - /DATA:/DATA

@@ -1,6 +1,6 @@
 "use client"
 
-import { useState, useCallback, useEffect, useRef, useSyncExternalStore } from "react"
+import { useState, useCallback, useEffect, useMemo, useRef, useSyncExternalStore } from "react"
 import {
   GitBranch,
   GitCommit,
@@ -9,9 +9,11 @@ import {
   FileMinus,
   File,
   ChevronRight,
+  ChevronDown,
+  PanelLeft,
+  Menu,
   RefreshCw,
   Folder,
-  FolderUp,
   Split,
   AlignJustify,
   FileCode,
@@ -26,7 +28,9 @@ import {
   Upload,
 } from "lucide-react"
 import { Card, CardHeader, CardTitle, CardContent } from "@/components/ui/card"
-import { Tabs, TabsList, TabsTrigger, TabsContent } from "@/components/ui/tabs"
+import { Collapsible, CollapsibleTrigger, CollapsibleContent } from "@/components/ui/collapsible"
+import { Sheet, SheetContent, SheetHeader, SheetTitle, SheetDescription } from "@/components/ui/sheet"
+import { Skeleton } from "@/components/ui/skeleton"
 import { Button } from "@/components/ui/button"
 import { Badge } from "@/components/ui/badge"
 import { ScrollArea } from "@/components/ui/scroll-area"
@@ -232,6 +236,73 @@ function statusLabel(s: string) {
   }
 }
 
+// ---------------------------------------------------------------------------
+// Sidebar: persisted geometry + All Files tree building
+// ---------------------------------------------------------------------------
+
+const SIDEBAR_MIN_WIDTH = 200
+const SIDEBAR_MAX_WIDTH = 400
+const SIDEBAR_DEFAULT_WIDTH = 280
+const SIDEBAR_WIDTH_KEY = "git-review-sidebar-width"
+const SIDEBAR_OPEN_KEY = "git-review-sidebar-open"
+
+function clampSidebarWidth(w: number) {
+  return Math.min(SIDEBAR_MAX_WIDTH, Math.max(SIDEBAR_MIN_WIDTH, Math.round(w)))
+}
+
+interface TreeNode {
+  name: string
+  path: string
+  type: "dir" | "file"
+  status: string
+  children: TreeNode[]
+}
+
+// Builds a nested tree from the flat /api/git/all-files entries (both dirs
+// and files). Dir nodes carry the status the API derived for them. Nodes
+// are sorted dirs-first, then alphabetically, at every level.
+function buildTree(entries: { path: string; status: string; type?: string }[]): TreeNode[] {
+  const root: TreeNode = { name: "", path: "", type: "dir", status: "", children: [] }
+  const dirIndex = new Map<string, TreeNode>([["", root]])
+
+  const ensureDir = (dirPath: string): TreeNode => {
+    const existing = dirIndex.get(dirPath)
+    if (existing) return existing
+    const name = dirPath.split("/").pop() ?? dirPath
+    const parentPath = dirPath.includes("/") ? dirPath.slice(0, dirPath.lastIndexOf("/")) : ""
+    const node: TreeNode = { name, path: dirPath, type: "dir", status: "", children: [] }
+    ensureDir(parentPath).children.push(node)
+    dirIndex.set(dirPath, node)
+    return node
+  }
+
+  for (const entry of entries) {
+    const name = entry.path.split("/").pop() ?? entry.path
+    if (entry.type === "dir") {
+      const dir = ensureDir(entry.path)
+      if (!dir.status) dir.status = entry.status
+    } else {
+      const parentPath = entry.path.includes("/") ? entry.path.slice(0, entry.path.lastIndexOf("/")) : ""
+      ensureDir(parentPath).children.push({
+        name,
+        path: entry.path,
+        type: "file",
+        status: entry.status,
+        children: [],
+      })
+    }
+  }
+
+  const sortNodes = (nodes: TreeNode[]) => {
+    nodes.sort((a, b) =>
+      a.type === b.type ? a.name.localeCompare(b.name) : a.type === "dir" ? -1 : 1
+    )
+    for (const n of nodes) if (n.type === "dir") sortNodes(n.children)
+  }
+  sortNodes(root.children)
+  return root.children
+}
+
 function DiffView({ raw, view, fullPath }: { raw: string; view: "unified" | "split"; fullPath: string }) {
   const hunks = parseDiff(raw)
   const { copiedKey, anchor, click, rangePreview, setHover } = useCopyRange(fullPath)
@@ -419,7 +490,6 @@ export default function GitReviewPage() {
   const [branch, setBranch] = useState("")
   const [selectedFile, setSelectedFile] = useState<string | null>(null)
   const [selectedStaged, setSelectedStaged] = useState(false)
-  const [activeTab, setActiveTab] = useState("changes")
   const [fileDiff, setFileDiff] = useState("")
   const [diffLoading, setDiffLoading] = useState(false)
   const [viewMode, setViewMode] = useState<"unified" | "split" | "raw">("split")
@@ -430,13 +500,23 @@ export default function GitReviewPage() {
   const [rawFile, setRawFile] = useState("")
   const [rawError, setRawError] = useState("")
   const [allFiles, setAllFiles] = useState<{ path: string; status: string; type?: string }[]>([])
-  const [allFilesDir, setAllFilesDir] = useState("")
   const [selectedFromAll, setSelectedFromAll] = useState(false)
   const [commitMsg, setCommitMsg] = useState("")
   const [busyAction, setBusyAction] = useState<string | null>(null)
   const [actionResult, setActionResult] = useState<{ ok: boolean; message: string } | null>(null)
   const diffCardRef = useRef<HTMLDivElement>(null)
   const [isFullscreen, setIsFullscreen] = useState(false)
+
+  // --- Sidebar (VS Code-style) state --------------------------------------
+  const [sidebarOpen, setSidebarOpen] = useState(true)
+  const [sidebarWidth, setSidebarWidth] = useState(SIDEBAR_DEFAULT_WIDTH)
+  const [isResizing, setIsResizing] = useState(false)
+  // On mobile the sidebar lives in a Sheet overlay instead of the aside.
+  const [mobileOpen, setMobileOpen] = useState(false)
+  // Expanded dir paths in the "All Files" tree.
+  const [expandedDirs, setExpandedDirs] = useState<Set<string>>(() => new Set())
+  // Which of the three sidebar sections are expanded.
+  const [openSections, setOpenSections] = useState({ changes: false, staged: false, all: true })
 
   useEffect(() => {
     const onChange = () => setIsFullscreen(!!document.fullscreenElement)
@@ -460,6 +540,84 @@ export default function GitReviewPage() {
     localStorage.setItem("git-review-dark", String(next))
   }, [])
 
+  // --- Sidebar behavior ----------------------------------------------------
+
+  // Restore persisted sidebar geometry once on mount. (Set-state is
+  // intentional here: SSR renders the defaults, so persisted geometry can
+  // only be applied after hydration — same rationale as the theme system.)
+  useEffect(() => {
+    try {
+      const storedWidth = parseInt(localStorage.getItem(SIDEBAR_WIDTH_KEY) ?? "", 10)
+      // eslint-disable-next-line react-hooks/set-state-in-effect -- restoring persisted UI geometry from localStorage after hydration; SSR must render defaults
+      if (!Number.isNaN(storedWidth)) setSidebarWidth(clampSidebarWidth(storedWidth))
+      const storedOpen = localStorage.getItem(SIDEBAR_OPEN_KEY)
+      if (storedOpen !== null) setSidebarOpen(storedOpen === "true")
+    } catch {
+      // localStorage unavailable — defaults are fine
+    }
+  }, [])
+
+  // Persist the open/closed state on every change (skipping the first,
+  // still-default render so the restored value is never clobbered).
+  const sidebarMountedRef = useRef(false)
+  useEffect(() => {
+    if (!sidebarMountedRef.current) {
+      sidebarMountedRef.current = true
+      return
+    }
+    try {
+      localStorage.setItem(SIDEBAR_OPEN_KEY, String(sidebarOpen))
+    } catch {}
+  }, [sidebarOpen])
+
+  const toggleSidebar = useCallback(() => {
+    setSidebarOpen(open => !open)
+  }, [])
+
+  // Ctrl/Cmd+B toggles the sidebar (VS Code muscle memory).
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "b") {
+        e.preventDefault()
+        toggleSidebar()
+      }
+    }
+    window.addEventListener("keydown", onKey)
+    return () => window.removeEventListener("keydown", onKey)
+  }, [toggleSidebar])
+
+  // Drag the sidebar's right edge to resize (clamped 200–400px, persisted
+  // on release). Double-clicking the handle resets to the default width.
+  const widthRef = useRef(SIDEBAR_DEFAULT_WIDTH)
+  const startResize = useCallback(
+    (e: React.PointerEvent<HTMLDivElement>) => {
+      e.preventDefault()
+      const startX = e.clientX
+      const startWidth = sidebarWidth
+      widthRef.current = startWidth
+      setIsResizing(true)
+      document.body.style.userSelect = "none"
+      document.body.style.cursor = "col-resize"
+      const onMove = (ev: PointerEvent) => {
+        widthRef.current = clampSidebarWidth(startWidth + ev.clientX - startX)
+        setSidebarWidth(widthRef.current)
+      }
+      const onUp = () => {
+        document.removeEventListener("pointermove", onMove)
+        document.removeEventListener("pointerup", onUp)
+        document.body.style.userSelect = ""
+        document.body.style.cursor = ""
+        setIsResizing(false)
+        try {
+          localStorage.setItem(SIDEBAR_WIDTH_KEY, String(widthRef.current))
+        } catch {}
+      }
+      document.addEventListener("pointermove", onMove)
+      document.addEventListener("pointerup", onUp)
+    },
+    [sidebarWidth]
+  )
+
   const loadAllFiles = useCallback(async (repo?: string) => {
     const target = repo ?? repoPath
     try {
@@ -467,7 +625,6 @@ export default function GitReviewPage() {
       const data = await res.json()
       if (!data.error) {
         setAllFiles(data.files || [])
-        setAllFilesDir("")
       }
     } catch {
       // silently fail — this is auxiliary
@@ -512,10 +669,79 @@ export default function GitReviewPage() {
     }
   }, [repoPath])
 
+  // --- All Files tree + selection helpers --------------------------------
+
+  const toggleDir = useCallback((dirPath: string) => {
+    setExpandedDirs(prev => {
+      const next = new Set(prev)
+      if (next.has(dirPath)) next.delete(dirPath)
+      else next.add(dirPath)
+      return next
+    })
+  }, [])
+
+  // Expands every ancestor directory of `filePath` in the All Files tree so
+  // the selected file stays visible there no matter which section it was
+  // picked from.
+  const expandAncestors = useCallback((filePath: string) => {
+    if (!filePath.includes("/")) return
+    setExpandedDirs(prev => {
+      let changed = false
+      const next = new Set(prev)
+      const segments = filePath.split("/")
+      for (let i = 1; i < segments.length; i++) {
+        const dir = segments.slice(0, i).join("/")
+        if (!next.has(dir)) {
+          next.add(dir)
+          changed = true
+        }
+      }
+      return changed ? next : prev
+    })
+  }, [])
+
+  // Selecting a file from the All Files tree shows its raw content (no
+  // diff) unless the file has uncommitted changes, in which case we show the
+  // diff so the view is consistent with the Changes/Staged sections.
+  const selectFromTree = useCallback(
+    (filePath: string) => {
+      setSelectedFile(filePath)
+      setMdRender(false)
+      setMdContent("")
+      setRawContent("")
+      setRawFile("")
+      setRawError("")
+      // Check if this file has uncommitted changes (modified/staged/deleted/renamed)
+      const changedFile = files.find(f => f.path === filePath)
+      if (changedFile) {
+        // File has changes — show diff instead of raw content
+        setSelectedStaged(changedFile.staged)
+        setSelectedFromAll(false)
+        setFileDiff("")
+        setDiffLoading(true)
+        if (viewMode === "raw") loadRaw(filePath)
+        fetch(`/api/git/diff?repo=${encodeURIComponent(repoPath)}&file=${encodeURIComponent(filePath)}&staged=${changedFile.staged ? 1 : 0}`)
+          .then(res => res.json())
+          .then(data => setFileDiff(data.diff || ""))
+          .catch(() => setFileDiff(""))
+          .finally(() => setDiffLoading(false))
+      } else {
+        // No changes — show raw content (untracked/new file)
+        setSelectedStaged(false)
+        setSelectedFromAll(true)
+        setFileDiff("")
+        setDiffLoading(false)
+        loadRaw(filePath)
+      }
+    },
+    [files, repoPath, viewMode, loadRaw]
+  )
+
   const loadDiff = useCallback(async (file: string, staged: boolean) => {
     setSelectedFile(file)
     setSelectedStaged(staged)
     setSelectedFromAll(false)
+    expandAncestors(file)
     setMdRender(false)
     setMdContent("")
     setRawContent("")
@@ -534,7 +760,7 @@ export default function GitReviewPage() {
     } finally {
       setDiffLoading(false)
     }
-  }, [repoPath, viewMode, loadRaw])
+  }, [repoPath, viewMode, loadRaw, expandAncestors])
 
   const runAction = useCallback(async (
     action: "add" | "addAll" | "unstage" | "unstageAll" | "commit" | "push",
@@ -587,302 +813,382 @@ export default function GitReviewPage() {
     }
   }, [repoPath])
 
+  const didInitialLoadRef = useRef(false)
+  useEffect(() => {
+    if (didInitialLoadRef.current) return
+    didInitialLoadRef.current = true
+    loadStatus()
+  }, [loadStatus])
+
+  const changesFiles = files.filter(f => !f.staged)
   const stagedFiles = files.filter(f => f.staged)
-  const changedFiles = files.filter(f => !f.staged && f.status !== "untracked")
-  const untrackedFiles = files.filter(f => f.status === "untracked")
-  // Absolute path of the currently selected file — used by the copy
-  // path:line action in every view type.
+
+  const fileTree = useMemo(() => buildTree(allFiles), [allFiles])
+
   const selectedFullPath = selectedFile ? (repoPath ? `${repoPath}/${selectedFile}` : selectedFile) : ""
 
-  // Entries of the currently browsed directory ("" = repo root).
-  const visibleAllFiles = allFiles.filter(
-    (e) =>
-      (e.path.includes("/") ? e.path.slice(0, e.path.lastIndexOf("/")) : "") ===
-      allFilesDir
+  const handleRowKeyDown = (
+    e: React.KeyboardEvent<HTMLDivElement>,
+    opts: { activate?: () => void; dirPath?: string }
+  ) => {
+    if (e.key === "Enter" || e.key === " ") {
+      if (opts.activate) {
+        e.preventDefault()
+        opts.activate()
+      }
+    } else if (e.key === "ArrowDown" || e.key === "ArrowUp") {
+      e.preventDefault()
+      const container = e.currentTarget.closest("[data-sidebar-body]")
+      const rows = container
+        ? Array.from(container.querySelectorAll<HTMLElement>("[data-file-row]"))
+        : []
+      const i = rows.indexOf(e.currentTarget)
+      rows[i + (e.key === "ArrowDown" ? 1 : -1)]?.focus()
+    } else if (opts.dirPath && (e.key === "ArrowRight" || e.key === "ArrowLeft")) {
+      const expanded = expandedDirs.has(opts.dirPath)
+      if ((e.key === "ArrowRight") !== expanded) {
+        e.preventDefault()
+        toggleDir(opts.dirPath)
+      }
+    }
+  }
+
+  const renderSkeletonRows = (count = 5) => (
+    <div className="space-y-2 px-2 py-1">
+      {Array.from({ length: count }).map((_, i) => (
+        <div key={i} className="flex items-center gap-2">
+          <Skeleton className="size-4 shrink-0 rounded" />
+          <Skeleton className="h-3.5 flex-1" />
+        </div>
+      ))}
+    </div>
   )
 
-  const renderAllFileList = (entries: { path: string; status: string; type?: string }[], emptyText: string) => {
-    if (entries.length === 0 && allFilesDir === "") {
-      return (
-        <div className="h-72 flex items-center justify-center text-xs text-muted-foreground">
-          {emptyText}
-        </div>
-      )
-    }
+  const renderStatusRow = (entry: GitFile, onNavigate: () => void) => {
+    const active = selectedFile === entry.path
     return (
-      <ScrollArea className="h-72">
-        <div className="p-1">
-          {allFilesDir !== "" && (
-            <div
-              onClick={() =>
-                setAllFilesDir(
-                  allFilesDir.includes("/")
-                    ? allFilesDir.slice(0, allFilesDir.lastIndexOf("/"))
-                    : ""
-                )
-              }
-              className="group flex items-center gap-1 px-2 py-1.5 rounded-md text-xs transition-colors cursor-pointer text-foreground hover:bg-accent hover:text-accent-foreground"
-            >
-              <span className="shrink-0 text-muted-foreground">
-                <FolderUp size={14} />
+      <div
+        key={`${entry.staged ? "s" : "w"}-${entry.path}`}
+        data-file-row
+        tabIndex={0}
+        role="button"
+        onClick={() => {
+          loadDiff(entry.path, entry.staged)
+          onNavigate()
+        }}
+        onKeyDown={e =>
+          handleRowKeyDown(e, {
+            activate: () => {
+              loadDiff(entry.path, entry.staged)
+              onNavigate()
+            },
+          })
+        }
+        className={`group flex items-center gap-1 rounded-md px-2 py-1.5 text-xs outline-none transition-colors cursor-pointer focus-visible:ring-2 focus-visible:ring-ring ${active ? "bg-primary text-primary-foreground" : "text-foreground hover:bg-accent hover:text-accent-foreground"}`}
+      >
+        <Tooltip>
+          <TooltipTrigger asChild>
+            <div className="flex min-w-0 flex-1 items-center gap-2 text-left">
+              <span className={`shrink-0 ${active ? "text-primary-foreground" : "text-muted-foreground"}`}>
+                {statusIcon(entry.status)}
               </span>
-              <span className="truncate flex-1">..</span>
-              <span className="text-[10px] px-1.5 py-0.5 rounded border shrink-0 bg-muted text-muted-foreground border-border">
-                {allFilesDir}
-              </span>
+              <span className="flex-1 truncate">{entry.path.split("/").pop()}</span>
+              {entry.status !== "untracked" && (
+                <span
+                  className={`shrink-0 rounded border px-1.5 py-0 text-[10px] ${active ? "bg-primary-foreground/20 text-primary-foreground border-primary-foreground/30" : statusBadgeColor(entry.status)}`}
+                >
+                  {statusLabel(entry.status)}
+                </span>
+              )}
             </div>
-          )}
-          {entries.map((entry) => {
-            const isDir = entry.type === "dir"
-            return (
-            <div
-              key={entry.path}
-              onClick={() => {
-                if (isDir) {
-                  setAllFilesDir(entry.path)
-                  return
-                }
-                setSelectedFile(entry.path)
-                setSelectedStaged(false)
-                setSelectedFromAll(true)
-                setMdRender(false)
-                setMdContent("")
-                setFileDiff("")
-                setDiffLoading(false)
-                loadRaw(entry.path)
-              }}
-              className={`group flex items-center gap-1 px-2 py-1.5 rounded-md text-xs transition-colors cursor-pointer ${selectedFile === entry.path && selectedFromAll && !isDir ? "bg-primary text-primary-foreground" : "text-foreground hover:bg-accent hover:text-accent-foreground"}`}
-            >
-              <Tooltip>
-                <TooltipTrigger asChild>
-                  <div className="flex items-center gap-2 flex-1 min-w-0 text-left">
-                    <span className={`shrink-0 ${selectedFile === entry.path && selectedFromAll && !isDir ? "text-primary-foreground" : isDir ? "text-muted-foreground/70" : "text-muted-foreground"}`}>
-                      {isDir ? <Folder size={14} /> : entry.status === "untracked" ? <Plus size={14} /> : <File size={14} />}
-                    </span>
-                    <span className={`truncate flex-1 ${isDir ? "font-medium" : ""}`}>{entry.path.split("/").pop()}</span>
-                    <span className={`text-[10px] px-1.5 py-0.5 rounded border shrink-0 ${selectedFile === entry.path && selectedFromAll && !isDir ? "bg-primary-foreground/20 text-primary-foreground border-primary-foreground/30" : "bg-muted text-muted-foreground border-border"}`}>
-                      {entry.status}
-                    </span>
-                  </div>
-                </TooltipTrigger>
-                <TooltipContent side="right" className="max-w-xs">
-                  <p className="text-xs">{entry.path}</p>
-                </TooltipContent>
-              </Tooltip>
-            </div>
-            )
-          })}
-        </div>
-      </ScrollArea>
+          </TooltipTrigger>
+          <TooltipContent side="right" className="max-w-xs">
+            <p className="text-xs">{entry.path}</p>
+            {entry.oldPath && <p className="text-xs text-muted-foreground">from: {entry.oldPath}</p>}
+          </TooltipContent>
+        </Tooltip>
+      </div>
     )
   }
 
-  // Shared row renderer for every file-list tab. `staged` marks which
-  // working-tree group the list belongs to, so selection highlighting only
-  // applies while the diff viewer is showing that file from that group.
-  const renderFileList = (entries: GitFile[], emptyText: string) => {
-    if (entries.length === 0) {
-      return (
-        <div className="h-72 flex items-center justify-center text-xs text-muted-foreground">
-          {emptyText}
-        </div>
-      )
-    }
-    return (
-      <ScrollArea className="h-72">
-        <div className="p-1">
-          {entries.map((entry) => (
+  const renderTreeNodes = (nodes: TreeNode[], depth: number, onNavigate: () => void) => (
+    <>
+      {nodes.map((node) => {
+        const isDir = node.type === "dir"
+        const expanded = isDir && expandedDirs.has(node.path)
+        const active = !isDir && selectedFile === node.path
+        const activate = () => {
+          if (isDir) {
+            toggleDir(node.path)
+          } else {
+            selectFromTree(node.path)
+            onNavigate()
+          }
+        }
+        return (
+          <div key={node.path}>
             <div
-              key={`${entry.staged ? "s" : "w"}-${entry.path}`}
-              onClick={() => loadDiff(entry.path, entry.staged)}
-              className={`group flex items-center gap-1 px-2 py-1.5 rounded-md text-xs transition-colors cursor-pointer ${selectedFile === entry.path && selectedStaged === entry.staged ? "bg-primary text-primary-foreground" : "text-foreground hover:bg-accent hover:text-accent-foreground"}`}
+              data-file-row
+              tabIndex={0}
+              role="button"
+              onClick={activate}
+              onKeyDown={e =>
+                handleRowKeyDown(e, {
+                  activate,
+                  dirPath: isDir ? node.path : undefined,
+                })
+              }
+              style={{ paddingLeft: 8 + depth * 12 }}
+              className={`group flex items-center gap-1 rounded-md py-1.5 pr-2 text-xs outline-none transition-colors cursor-pointer focus-visible:ring-2 focus-visible:ring-ring ${active ? "bg-primary text-primary-foreground" : "text-foreground hover:bg-accent hover:text-accent-foreground"}`}
             >
               <Tooltip>
                 <TooltipTrigger asChild>
-                  <div className="flex items-center gap-2 flex-1 min-w-0 text-left">
-                    <span className={`shrink-0 ${selectedFile === entry.path && selectedStaged === entry.staged ? "text-primary-foreground" : "text-muted-foreground"}`}>
-                      {statusIcon(entry.status)}
+                  <div className="flex min-w-0 flex-1 items-center gap-1.5 text-left">
+                    {isDir ? (
+                      <ChevronDown
+                        size={14}
+                        className={`shrink-0 text-muted-foreground transition-transform ${expanded ? "" : "-rotate-90"}`}
+                      />
+                    ) : (
+                      <span className="w-3.5 shrink-0" />
+                    )}
+                    <span className={`shrink-0 ${active ? "text-primary-foreground" : "text-muted-foreground"}`}>
+                      {isDir ? <Folder size={14} /> : node.status === "untracked" ? <Plus size={14} /> : <File size={14} />}
                     </span>
-                    <span className="truncate flex-1">{entry.path.split("/").pop()}</span>
-                    {entry.status !== "untracked" && (
-                      <span className={`text-[10px] px-1.5 py-0.5 rounded border shrink-0 ${selectedFile === entry.path && selectedStaged === entry.staged ? "bg-primary-foreground/20 text-primary-foreground border-primary-foreground/30" : statusBadgeColor(entry.status)}`}>
-                        {statusLabel(entry.status)}
+                    <span className={`flex-1 truncate ${isDir ? "font-medium" : ""}`}>{node.name}</span>
+                    {node.status === "untracked" && (
+                      <span
+                        className={`shrink-0 rounded border px-1.5 py-0 text-[10px] ${active ? "bg-primary-foreground/20 text-primary-foreground border-primary-foreground/30" : "bg-muted text-muted-foreground border-border"}`}
+                      >
+                        {statusLabel("untracked")}
                       </span>
                     )}
                   </div>
                 </TooltipTrigger>
                 <TooltipContent side="right" className="max-w-xs">
-                  <p className="text-xs">{entry.path}</p>
-                  {entry.oldPath && <p className="text-xs text-muted-foreground">from: {entry.oldPath}</p>}
+                  <p className="text-xs">{node.path}</p>
                 </TooltipContent>
               </Tooltip>
             </div>
-          ))}
-        </div>
-      </ScrollArea>
-    )
-  }
+            {isDir && expanded && renderTreeNodes(node.children, depth + 1, onNavigate)}
+          </div>
+        )
+      })}
+    </>
+  )
+
+  const sectionHeader = (key: "changes" | "staged" | "all", icon: React.ReactNode, label: string, count: number) => (
+    <CollapsibleTrigger className="flex w-full items-center gap-1.5 rounded-md px-2 py-1.5 text-xs font-medium text-muted-foreground outline-none transition-colors hover:bg-accent hover:text-accent-foreground focus-visible:ring-2 focus-visible:ring-ring">
+      <ChevronDown size={14} className={`shrink-0 transition-transform ${openSections[key] ? "" : "-rotate-90"}`} />
+      <span className="shrink-0">{icon}</span>
+      <span className="flex-1 text-left">{label}</span>
+      <span className="shrink-0 rounded border border-border bg-muted px-1.5 py-0 text-[10px] tabular-nums text-muted-foreground">
+        {count}
+      </span>
+    </CollapsibleTrigger>
+  )
+
+  const sidebarContent = (onNavigate: () => void) => (
+    <>
+      <Collapsible
+        open={openSections.changes}
+        onOpenChange={o => setOpenSections(s => ({ ...s, changes: o }))}
+      >
+        {sectionHeader("changes", <FilePen size={13} />, "Changes", changesFiles.length)}
+        <CollapsibleContent>
+          {loading && changesFiles.length === 0 ? (
+            renderSkeletonRows()
+          ) : changesFiles.length === 0 ? (
+            <p className="px-4 py-2 text-[11px] text-muted-foreground">No changes</p>
+          ) : (
+            <div className="pb-1">
+              {changesFiles.map(f => renderStatusRow(f, onNavigate))}
+            </div>
+          )}
+        </CollapsibleContent>
+      </Collapsible>
+
+      <Collapsible
+        open={openSections.staged}
+        onOpenChange={o => setOpenSections(s => ({ ...s, staged: o }))}
+      >
+        {sectionHeader("staged", <GitCommit size={13} />, "Staged", stagedFiles.length)}
+        <CollapsibleContent>
+          {loading && stagedFiles.length === 0 ? (
+            renderSkeletonRows(3)
+          ) : stagedFiles.length === 0 ? (
+            <p className="px-4 py-2 text-[11px] text-muted-foreground">Nothing staged</p>
+          ) : (
+            <div className="pb-1">
+              {stagedFiles.map(f => renderStatusRow(f, onNavigate))}
+            </div>
+          )}
+        </CollapsibleContent>
+      </Collapsible>
+
+      <Collapsible
+        open={openSections.all}
+        onOpenChange={o => setOpenSections(s => ({ ...s, all: o }))}
+      >
+        {sectionHeader("all", <Folder size={13} />, "All Files", allFiles.length)}
+        <CollapsibleContent>
+          {allFiles.length === 0 ? (
+            renderSkeletonRows(6)
+          ) : (
+            <div className="pb-1">{renderTreeNodes(fileTree, 0, onNavigate)}</div>
+          )}
+        </CollapsibleContent>
+      </Collapsible>
+    </>
+  )
 
   return (
     <TooltipProvider delayDuration={0}>
-      <div className="min-h-screen bg-background text-foreground">
-        <div className="max-w-6xl mx-auto p-4 space-y-4">
-          {/* Header */}
-          <div className="flex items-center justify-between">
-            <div className="flex items-center gap-3">
-              <GitBranch size={20} className="text-muted-foreground" />
-              <h1 className="text-lg font-semibold">Git Review</h1>
-              {branch && <Badge variant="secondary" className="text-xs">{branch}</Badge>}
-            </div>
+      <div className="flex h-dvh flex-col overflow-hidden bg-background text-foreground">
+        {/* Header: repo selector + git actions sit above the sidebar/content split */}
+        <header className="shrink-0 border-b border-border">
+          <div className="flex items-center gap-2 px-3 py-2 sm:px-4">
             <Button
-              variant="outline"
-              size="sm"
-              onClick={() => toggleTheme()}
-              className="gap-2"
+              variant="ghost"
+              size="icon"
+              className="h-8 w-8 md:hidden"
+              title="Open file sidebar"
+              onClick={() => setMobileOpen(true)}
             >
+              <Menu size={16} />
+            </Button>
+            <Button
+              variant="ghost"
+              size="icon"
+              className="hidden h-8 w-8 md:inline-flex"
+              title="Toggle sidebar (Ctrl+B)"
+              onClick={toggleSidebar}
+            >
+              <PanelLeft size={16} />
+            </Button>
+            <GitBranch size={18} className="text-muted-foreground" />
+            <h1 className="text-sm font-semibold sm:text-lg">Git Review</h1>
+            {branch && <Badge variant="secondary" className="text-xs">{branch}</Badge>}
+            <div className="flex-1" />
+            {actionResult && (
+              <span
+                className={`max-w-32 truncate text-xs sm:max-w-72 ${actionResult.ok ? "text-green-600 dark:text-green-400" : "text-destructive"}`}
+                title={actionResult.message}
+              >
+                {actionResult.message}
+              </span>
+            )}
+            <Button variant="outline" size="sm" onClick={() => toggleTheme()} className="gap-2">
               {isDark ? <Sun size={14} /> : <Moon size={14} />}
               <span className="hidden sm:inline">{isDark ? "Light" : "Dark"}</span>
             </Button>
           </div>
 
-          {/* Repo Input */}
-          <Card className="px-2 py-0">
-
-            <form
-              onSubmit={e => { e.preventDefault(); loadStatus() }}
-              className="flex gap-2"
-            >
-              <div className="relative flex-1 my-2">
-                <Folder size={14} className="absolute left-3 top-1/2 -translate-y-1/2 text-muted-foreground pointer-events-none" />
-                <select
-                  value={repoPath}
-                  onChange={e => {
-                    setRepoPath(e.target.value)
-                    setSelectedFile(null)
-                    setFiles([])
-                    setAllFiles([])
-                    loadStatus(e.target.value)
-                  }}
-                  title={repoPath}
-                  className="h-10 w-full rounded-md border border-input bg-background pl-9 pr-3 font-mono text-sm text-foreground focus:outline-none focus:ring-2 focus:ring-ring cursor-pointer"
-                >
-                  {projects.projects.map(p => (
-                    <option key={p.dir} value={p.dir}>{p.name}</option>
-                  ))}
-                </select>
-              </div>
-              <Button type="submit" disabled={loading} className="h-10 gap-1.5 my-2">
-                <RefreshCw size={14} className={loading ? "animate-spin" : ""} />
-                <span className="hidden sm:inline">Refresh</span>
-              </Button>
-            </form>
-
-          </Card>
-
-          {/* Git Actions */}
-          <Card className="px-3 py-2">
-            <div className="flex flex-col sm:flex-row gap-2">
-              <input
-                value={commitMsg}
-                onChange={e => setCommitMsg(e.target.value)}
-                onKeyDown={e => {
-                  if (e.key === "Enter" && commitMsg.trim() && !busyAction) {
-                    runAction("commit", { message: commitMsg })
-                  }
+          {/* Repo selector + git actions */}
+          <form
+            onSubmit={e => { e.preventDefault(); loadStatus() }}
+            className="grid grid-cols-4 gap-2 border-t border-border px-3 py-2 sm:flex sm:flex-wrap sm:items-center sm:px-4"
+          >
+            <div className="relative col-span-3 min-w-40 flex-1 sm:max-w-xs">
+              <Folder size={14} className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-muted-foreground" />
+              <select
+                value={repoPath}
+                onChange={e => {
+                  setRepoPath(e.target.value)
+                  setSelectedFile(null)
+                  setSelectedFromAll(false)
+                  setFiles([])
+                  setAllFiles([])
+                  setExpandedDirs(new Set())
+                  loadStatus(e.target.value)
                 }}
-                placeholder="Commit message…"
-                className="h-10 flex-1 rounded-md border border-input bg-background px-3 text-sm text-foreground placeholder:text-muted-foreground focus:outline-none focus:ring-2 focus:ring-ring"
-              />
-              <Button
-                className="h-10 gap-1.5"
-                disabled={!!busyAction || !commitMsg.trim()}
-                onClick={() => runAction("commit", { message: commitMsg })}
+                title={repoPath}
+                className="h-9 w-full cursor-pointer rounded-md border border-input bg-background pl-9 pr-3 font-mono text-sm text-foreground focus:outline-none focus:ring-2 focus:ring-ring"
               >
-                {busyAction === "commit" ? <RefreshCw size={14} className="animate-spin" /> : <Check size={14} />}
-                Commit
-              </Button>
-              <Button
-                variant="outline"
-                className="h-10 gap-1.5"
-                disabled={!!busyAction}
-                onClick={() => runAction("push")}
-              >
-                {busyAction === "push" ? <RefreshCw size={14} className="animate-spin" /> : <Upload size={14} />}
-                Push
-              </Button>
+                {projects.projects.map(p => (
+                  <option key={p.dir} value={p.dir}>{p.name}</option>
+                ))}
+              </select>
             </div>
-          </Card>
+            <Button type="submit" size="sm" disabled={loading} className="col-span-1 gap-1.5">
+              <RefreshCw size={14} className={loading ? "animate-spin" : ""} />
+              <span className="hidden sm:inline">Refresh</span>
+            </Button>
+            <input
+              value={commitMsg}
+              onChange={e => setCommitMsg(e.target.value)}
+              onKeyDown={e => {
+                if (e.key === "Enter" && commitMsg.trim() && !busyAction) {
+                  runAction("commit", { message: commitMsg })
+                }
+              }}
+              placeholder="Commit message…"
+              className="col-span-2 h-9 min-w-40 flex-1 rounded-md border border-input bg-background px-3 text-sm text-foreground placeholder:text-muted-foreground focus:outline-none focus:ring-2 focus:ring-ring"
+            />
+            <Button
+              size="sm"
+              className="col-span-1 gap-1.5"
+              disabled={!!busyAction || !commitMsg.trim()}
+              onClick={() => runAction("commit", { message: commitMsg })}
+            >
+              {busyAction === "commit" ? <RefreshCw size={14} className="animate-spin" /> : <Check size={14} />}
+              Commit
+            </Button>
+            <Button
+              variant="outline"
+              size="sm"
+              className="col-span-1 gap-1.5"
+              disabled={!!busyAction}
+              onClick={() => runAction("push")}
+            >
+              {busyAction === "push" ? <RefreshCw size={14} className="animate-spin" /> : <Upload size={14} />}
+              Push
+            </Button>
+          </form>
 
           {error && (
-            <div className="rounded-lg border border-destructive/30 bg-destructive/10 p-3 text-sm text-destructive">{error}</div>
+            <div className="border-t border-border bg-destructive/10 px-3 py-1.5 text-sm text-destructive sm:px-4" title={error}>
+              <span className="line-clamp-1">{error}</span>
+            </div>
+          )}
+        </header>
+
+        {/* Sidebar + content split */}
+        <div className="flex min-h-0 flex-1">
+          {sidebarOpen && (
+            <>
+              {/* Desktop sidebar (VS Code-style) */}
+              <aside
+                className="hidden shrink-0 flex-col border-r border-border bg-card md:flex"
+                style={{ width: sidebarWidth }}
+              >
+                <div className="min-h-0 flex-1" data-sidebar-body>
+                  <ScrollArea className="h-full">
+                    <div className="space-y-1 py-2 pr-2">{sidebarContent(() => {})}</div>
+                  </ScrollArea>
+                </div>
+              </aside>
+              {/* Drag handle: resize sidebar (double-click resets width) */}
+              <div
+                onPointerDown={startResize}
+                onDoubleClick={() => setSidebarWidth(SIDEBAR_DEFAULT_WIDTH)}
+                title="Drag to resize · double-click to reset"
+                className={`hidden w-1 shrink-0 cursor-col-resize bg-border transition-colors hover:bg-ring md:block ${isResizing ? "bg-ring" : ""}`}
+              />
+            </>
           )}
 
-          <div className="grid grid-cols-1 lg:grid-cols-5 gap-4">
-            {/* File List */}
-            <div className="lg:col-span-2">
-              <Card className="h-full">
-                <Tabs value={activeTab} onValueChange={setActiveTab} className="flex flex-col">
-                  <CardHeader className="p-0">
-                    <TabsList className="grid w-full grid-cols-4 h-auto rounded-none p-0 bg-muted">
-                      <TabsTrigger value="all" className="gap-1.5 text-sm w-full justify-center rounded-none py-2">
-                        <File size={13} />
-                        All
-                        <span className="text-[10px] text-muted-foreground">({visibleAllFiles.length})</span>
-                      </TabsTrigger>
-                      <TabsTrigger value="changes" className="gap-1.5 text-sm w-full justify-center rounded-none py-2">
-                        <FilePen size={13} />
-                        Changes
-                        <span className="text-[10px] text-muted-foreground">({changedFiles.length})</span>
-                      </TabsTrigger>
-                      <TabsTrigger value="untracked" className="gap-1.5 text-sm w-full justify-center rounded-none py-2">
-                        <Plus size={13} />
-                        Untracked
-                        <span className="text-[10px] text-muted-foreground">({untrackedFiles.length})</span>
-                      </TabsTrigger>
-                      <TabsTrigger value="staged" className="gap-1.5 text-sm w-full justify-center rounded-none py-2">
-                        <GitCommit size={13} />
-                        Staged
-                        <span className="text-[10px] text-muted-foreground">({stagedFiles.length})</span>
-                      </TabsTrigger>
-                    </TabsList>
-                  </CardHeader>
-                  <Separator />
-                  <CardContent className="p-0">
-                    <TabsContent value="all" className="mt-0">
-                      {renderAllFileList(visibleAllFiles, "No files")}
-                    </TabsContent>
-                    <TabsContent value="changes" className="mt-0">
-                      {renderFileList(changedFiles, "No modified files")}
-                    </TabsContent>
-                    <TabsContent value="untracked" className="mt-0">
-                      {renderFileList(untrackedFiles, "No untracked files")}
-                    </TabsContent>
-                    <TabsContent value="staged" className="mt-0">
-                      {renderFileList(stagedFiles, "Nothing staged")}
-                    </TabsContent>
-                  </CardContent>
-                </Tabs>
-              </Card>
-
-              {files.length === 0 && !loading && (
-                <Card>
-                  <CardContent className="p-6 text-center text-sm text-muted-foreground">
-                    No changes. Click Refresh to load.
-                  </CardContent>
-                </Card>
-              )}
-            </div>
-
-            {/* Diff Viewer */}
-            <div className="lg:col-span-3">
-              <Card ref={diffCardRef} className="h-full diff-card">
-                <CardHeader className="p-3 pb-2">
-                  <div className="flex items-center justify-between">
-                    <CardTitle className="text-sm truncate">
-                      {selectedFile ? selectedFile.split("/").pop() : "Select a file"}
-                    </CardTitle>
-                    {selectedFile && !selectedFromAll && (
-                      <div className="flex items-center gap-1">
+          {/* Diff viewer: fills the remaining space, no max-width constraint */}
+          <main className="flex min-w-0 flex-1 flex-col overflow-hidden p-2 sm:p-4">
+            <Card ref={diffCardRef} className="diff-card flex min-h-0 flex-1 flex-col overflow-hidden">
+              <CardHeader className="shrink-0 p-3 pb-2">
+                <div className="flex items-center justify-between gap-2">
+                  <CardTitle className="truncate text-sm">
+                    {selectedFile ? selectedFile.split("/").pop() : "Select a file"}
+                  </CardTitle>
+                  {selectedFile && (
+                    <div className="flex items-center gap-1">
+                      {!selectedFromAll && (
                         <Tooltip>
                           <TooltipTrigger asChild>
                             <Button
@@ -893,13 +1199,8 @@ export default function GitReviewPage() {
                               onClick={() => {
                                 if (selectedStaged) {
                                   runAction("unstage", { files: [selectedFile] })
-                                  // After unstaging, the file lands back in Changes
-                                  // (or Untracked if it was never tracked before).
-                                  const entry = files.find(f => f.path === selectedFile)
-                                  setActiveTab(entry && (entry.status === "added" || entry.status === "untracked") ? "untracked" : "changes")
                                 } else {
                                   runAction("add", { files: [selectedFile] })
-                                  setActiveTab("staged")
                                 }
                               }}
                             >
@@ -908,136 +1209,121 @@ export default function GitReviewPage() {
                           </TooltipTrigger>
                           <TooltipContent side="left">{selectedStaged ? "Unstage this file" : "Stage this file"}</TooltipContent>
                         </Tooltip>
-                        {selectedFile && isMarkdownFile(selectedFile) && (
-                          <Button
-                            variant={mdRender ? "default" : "outline"}
-                            size="icon"
-                            className="h-7 w-7"
-                            title="Render as Markdown"
-                            onClick={() => {
-                              if (!mdRender) loadMarkdown(selectedFile)
-                              setMdRender(!mdRender)
-                            }}
-                          >
-                            <Eye size={13} />
-                          </Button>
-                        )}
+                      )}
+                      {isMarkdownFile(selectedFile) && (
                         <Button
-                          variant={viewMode === "raw" ? "default" : "outline"}
+                          variant={mdRender ? "default" : "outline"}
                           size="icon"
                           className="h-7 w-7"
-                          title="View raw file (syntax highlighted)"
+                          title="Render as Markdown"
                           onClick={() => {
-                            setViewMode("raw")
-                            if (selectedFile && (rawFile !== selectedFile || rawError)) loadRaw(selectedFile)
+                            if (!mdRender) loadMarkdown(selectedFile)
+                            setMdRender(!mdRender)
                           }}
                         >
-                          <FileCode size={13} />
+                          <Eye size={13} />
                         </Button>
-                        <Button
-                          variant={viewMode === "unified" ? "default" : "outline"}
-                          size="icon"
-                          className="h-7 w-7"
-                          onClick={() => setViewMode("unified")}
-                        >
-                          <AlignJustify size={13} />
-                        </Button>
-                        <Button
-                          variant={viewMode === "split" ? "default" : "outline"}
-                          size="icon"
-                          className="h-7 w-7"
-                          onClick={() => setViewMode("split")}
-                        >
-                          <Split size={13} />
-                        </Button>
-                        <Button
-                          variant="outline"
-                          size="icon"
-                          className="h-7 w-7"
-                          title={isFullscreen ? "Exit fullscreen" : "Fullscreen"}
-                          onClick={toggleFullscreen}
-                        >
-                          {isFullscreen ? <Minimize size={13} /> : <Maximize size={13} />}
-                        </Button>
-                      </div>
-                    )}
-                    {selectedFile && selectedFromAll && (
-                      <div className="flex items-center gap-1">
-                        {selectedFile && isMarkdownFile(selectedFile) && (
+                      )}
+                      {!selectedFromAll && (
+                        <>
                           <Button
-                            variant={mdRender ? "default" : "outline"}
+                            variant={viewMode === "raw" ? "default" : "outline"}
                             size="icon"
                             className="h-7 w-7"
-                            title="Render as Markdown"
+                            title="View raw file (syntax highlighted)"
                             onClick={() => {
-                              if (!mdRender) loadMarkdown(selectedFile)
-                              setMdRender(!mdRender)
+                              setViewMode("raw")
+                              if (rawFile !== selectedFile || rawError) loadRaw(selectedFile)
                             }}
                           >
-                            <Eye size={13} />
+                            <FileCode size={13} />
                           </Button>
-                        )}
-                        <Button
-                          variant="outline"
-                          size="icon"
-                          className="h-7 w-7"
-                          title={isFullscreen ? "Exit fullscreen" : "Fullscreen"}
-                          onClick={toggleFullscreen}
-                        >
-                          {isFullscreen ? <Minimize size={13} /> : <Maximize size={13} />}
-                        </Button>
-                      </div>
-                    )}
-                  </div>
-                  {selectedFile && (
-                    <p className="text-xs truncate mt-1 text-muted-foreground">{selectedFile}</p>
+                          <Button variant={viewMode === "unified" ? "default" : "outline"} size="icon" className="h-7 w-7" onClick={() => setViewMode("unified")}>
+                            <AlignJustify size={13} />
+                          </Button>
+                          <Button variant={viewMode === "split" ? "default" : "outline"} size="icon" className="h-7 w-7" onClick={() => setViewMode("split")}>
+                            <Split size={13} />
+                          </Button>
+                        </>
+                      )}
+                      <Button
+                        variant="outline"
+                        size="icon"
+                        className="h-7 w-7"
+                        title={isFullscreen ? "Exit fullscreen" : "Fullscreen"}
+                        onClick={toggleFullscreen}
+                      >
+                        {isFullscreen ? <Minimize size={13} /> : <Maximize size={13} />}
+                      </Button>
+                    </div>
                   )}
-                </CardHeader>
-                <Separator />
-                <CardContent className="p-0 diff-content">
-                  <ScrollArea className="h-[calc(100vh-280px)] diff-scroll">
-                    {diffLoading && !selectedFromAll ? (
+                </div>
+                {selectedFile && (
+                  <p className="mt-1 truncate text-xs text-muted-foreground">{selectedFile}</p>
+                )}
+              </CardHeader>
+              <Separator />
+              <CardContent className="diff-content min-h-0 flex-1 p-0">
+                <ScrollArea className="diff-scroll h-full">
+                  {diffLoading && !selectedFromAll ? (
+                    <div className="flex items-center justify-center h-32">
+                      <RefreshCw size={20} className="animate-spin text-muted-foreground" />
+                    </div>
+                  ) : selectedFromAll && selectedFile ? (
+                    mdRender && isMarkdownFile(selectedFile) ? (
+                      <MarkdownView content={mdContent} />
+                    ) : rawError ? (
+                      <div className="p-4 text-sm text-destructive whitespace-pre-wrap break-words">{rawError}</div>
+                    ) : rawContent ? (
+                      <CodeView content={rawContent} file={selectedFile} fullPath={selectedFullPath} />
+                    ) : (
                       <div className="flex items-center justify-center h-32">
                         <RefreshCw size={20} className="animate-spin text-muted-foreground" />
                       </div>
-                    ) : selectedFromAll && selectedFile ? (
-                      mdRender && isMarkdownFile(selectedFile) ? (
-                        <MarkdownView content={mdContent} />
-                      ) : rawError ? (
-                        <div className="p-4 text-sm text-destructive whitespace-pre-wrap break-words">{rawError}</div>
-                      ) : rawContent ? (
-                        <CodeView content={rawContent} file={selectedFile} fullPath={selectedFullPath} />
-                      ) : (
-                        <div className="flex items-center justify-center h-32">
-                          <RefreshCw size={20} className="animate-spin text-muted-foreground" />
-                        </div>
-                      )
-                    ) : mdRender && isMarkdownFile(selectedFile ?? "") ? (
-                      <MarkdownView content={mdContent} />
-                    ) : viewMode === "raw" && selectedFile ? (
-                      rawError ? (
-                        <div className="p-4 text-sm text-destructive whitespace-pre-wrap break-words">{rawError}</div>
-                      ) : rawContent ? (
-                        <CodeView content={rawContent} file={selectedFile} fullPath={selectedFullPath} />
-                      ) : (
-                        <div className="flex items-center justify-center h-32">
-                          <RefreshCw size={20} className="animate-spin text-muted-foreground" />
-                        </div>
-                      )
-                    ) : fileDiff ? (
-                      <DiffView raw={fileDiff} view={viewMode === "split" ? "split" : "unified"} fullPath={selectedFullPath} />
+                    )
+                  ) : mdRender && isMarkdownFile(selectedFile ?? "") ? (
+                    <MarkdownView content={mdContent} />
+                  ) : viewMode === "raw" && selectedFile ? (
+                    rawError ? (
+                      <div className="p-4 text-sm text-destructive whitespace-pre-wrap break-words">{rawError}</div>
+                    ) : rawContent ? (
+                      <CodeView content={rawContent} file={selectedFile} fullPath={selectedFullPath} />
                     ) : (
-                      <div className="flex flex-col items-center justify-center h-40 text-muted-foreground">
-                        <GitCommit size={24} />
-                        <p className="text-sm mt-2">Select a file to view diff</p>
+                      <div className="flex items-center justify-center h-32">
+                        <RefreshCw size={20} className="animate-spin text-muted-foreground" />
                       </div>
-                    )}
-                  </ScrollArea>
-                </CardContent>
-              </Card>
-            </div>
-          </div>
+                    )
+                  ) : fileDiff ? (
+                    <DiffView raw={fileDiff} view={viewMode === "split" ? "split" : "unified"} fullPath={selectedFullPath} />
+                  ) : (
+                    <div className="flex flex-col items-center justify-center h-40 text-muted-foreground">
+                      <GitCommit size={24} />
+                      <p className="text-sm mt-2">Select a file to view diff</p>
+                    </div>
+                  )}
+                </ScrollArea>
+              </CardContent>
+            </Card>
+          </main>
         </div>
+
+        {/* Mobile: sidebar opens as a Sheet overlay */}
+        <Sheet open={mobileOpen} onOpenChange={setMobileOpen}>
+          <SheetContent side="left" className="w-80 gap-0 p-0 sm:max-w-xs">
+            <SheetHeader className="border-b border-border py-3">
+              <SheetTitle className="flex items-center gap-2 text-sm">
+                <Folder size={14} className="text-muted-foreground" />
+                Files
+              </SheetTitle>
+              <SheetDescription className="sr-only">Browse repository files</SheetDescription>
+            </SheetHeader>
+            <div className="min-h-0 flex-1" data-sidebar-body>
+              <ScrollArea className="h-full">
+                <div className="space-y-1 py-2 pr-2">{sidebarContent(() => setMobileOpen(false))}</div>
+              </ScrollArea>
+            </div>
+          </SheetContent>
+        </Sheet>
       </div>
     </TooltipProvider>
   )
