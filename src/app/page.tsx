@@ -28,7 +28,7 @@ import {
   Upload,
 } from "lucide-react"
 import { Card, CardHeader, CardTitle, CardContent } from "@/components/ui/card"
-import { Collapsible, CollapsibleTrigger, CollapsibleContent } from "@/components/ui/collapsible"
+import { Tabs, TabsList, TabsTrigger, TabsContent } from "@/components/ui/tabs"
 import { Sheet, SheetContent, SheetHeader, SheetTitle, SheetDescription } from "@/components/ui/sheet"
 import { Skeleton } from "@/components/ui/skeleton"
 import { Button } from "@/components/ui/button"
@@ -515,8 +515,7 @@ export default function GitReviewPage() {
   const [mobileOpen, setMobileOpen] = useState(false)
   // Expanded dir paths in the "All Files" tree.
   const [expandedDirs, setExpandedDirs] = useState<Set<string>>(() => new Set())
-  // Which of the three sidebar sections are expanded.
-  const [openSections, setOpenSections] = useState({ changes: false, staged: false, all: true })
+
 
   useEffect(() => {
     const onChange = () => setIsFullscreen(!!document.fullscreenElement)
@@ -824,6 +823,8 @@ export default function GitReviewPage() {
   const stagedFiles = files.filter(f => f.staged)
 
   const fileTree = useMemo(() => buildTree(allFiles), [allFiles])
+  const changesTree = useMemo(() => buildTree(changesFiles.map(f => ({ path: f.path, status: f.status }))), [changesFiles])
+  const stagedTree = useMemo(() => buildTree(stagedFiles.map(f => ({ path: f.path, status: f.status }))), [stagedFiles])
 
   const selectedFullPath = selectedFile ? (repoPath ? `${repoPath}/${selectedFile}` : selectedFile) : ""
 
@@ -863,53 +864,6 @@ export default function GitReviewPage() {
       ))}
     </div>
   )
-
-  const renderStatusRow = (entry: GitFile, onNavigate: () => void) => {
-    const active = selectedFile === entry.path
-    return (
-      <div
-        key={`${entry.staged ? "s" : "w"}-${entry.path}`}
-        data-file-row
-        tabIndex={0}
-        role="button"
-        onClick={() => {
-          loadDiff(entry.path, entry.staged)
-          onNavigate()
-        }}
-        onKeyDown={e =>
-          handleRowKeyDown(e, {
-            activate: () => {
-              loadDiff(entry.path, entry.staged)
-              onNavigate()
-            },
-          })
-        }
-        className={`group flex items-center gap-1 rounded-md px-2 py-1.5 text-xs outline-none transition-colors cursor-pointer focus-visible:ring-2 focus-visible:ring-ring ${active ? "bg-primary text-primary-foreground" : "text-foreground hover:bg-accent hover:text-accent-foreground"}`}
-      >
-        <Tooltip>
-          <TooltipTrigger asChild>
-            <div className="flex min-w-0 flex-1 items-center gap-2 text-left">
-              <span className={`shrink-0 ${active ? "text-primary-foreground" : "text-muted-foreground"}`}>
-                {statusIcon(entry.status)}
-              </span>
-              <span className="flex-1 truncate">{entry.path.split("/").pop()}</span>
-              {entry.status !== "untracked" && (
-                <span
-                  className={`shrink-0 rounded border px-1.5 py-0 text-[10px] ${active ? "bg-primary-foreground/20 text-primary-foreground border-primary-foreground/30" : statusBadgeColor(entry.status)}`}
-                >
-                  {statusLabel(entry.status)}
-                </span>
-              )}
-            </div>
-          </TooltipTrigger>
-          <TooltipContent side="right" className="max-w-xs">
-            <p className="text-xs">{entry.path}</p>
-            {entry.oldPath && <p className="text-xs text-muted-foreground">from: {entry.oldPath}</p>}
-          </TooltipContent>
-        </Tooltip>
-      </div>
-    )
-  }
 
   const renderTreeNodes = (nodes: TreeNode[], depth: number, onNavigate: () => void) => (
     <>
@@ -977,69 +931,136 @@ export default function GitReviewPage() {
     </>
   )
 
-  const sectionHeader = (key: "changes" | "staged" | "all", icon: React.ReactNode, label: string, count: number) => (
-    <CollapsibleTrigger className="flex w-full items-center gap-1.5 rounded-md px-2 py-1.5 text-xs font-medium text-muted-foreground outline-none transition-colors hover:bg-accent hover:text-accent-foreground focus-visible:ring-2 focus-visible:ring-ring">
-      <ChevronDown size={14} className={`shrink-0 transition-transform ${openSections[key] ? "" : "-rotate-90"}`} />
-      <span className="shrink-0">{icon}</span>
-      <span className="flex-1 text-left">{label}</span>
-      <span className="shrink-0 rounded border border-border bg-muted px-1.5 py-0 text-[10px] tabular-nums text-muted-foreground">
-        {count}
-      </span>
-    </CollapsibleTrigger>
+  function collectFilePaths(node: TreeNode): string[] {
+    if (node.type === "file") return [node.path]
+    return node.children.flatMap(collectFilePaths)
+  }
+
+  const renderGitTreeNodes = (nodes: TreeNode[], depth: number, onNavigate: () => void, staged: boolean) => (
+    <>
+      {nodes.map((node) => {
+        const isDir = node.type === "dir"
+        const expanded = isDir && expandedDirs.has(node.path)
+        const active = !isDir && selectedFile === node.path
+        const activate = () => {
+          if (isDir) {
+            toggleDir(node.path)
+          } else {
+            loadDiff(node.path, staged)
+            onNavigate()
+          }
+        }
+        const dirAction = isDir
+          ? () => runAction(staged ? "unstage" : "add", { files: collectFilePaths(node) })
+          : undefined
+        return (
+          <div key={node.path}>
+            <div
+              data-file-row
+              tabIndex={0}
+              role="button"
+              onClick={activate}
+              onKeyDown={e =>
+                handleRowKeyDown(e, {
+                  activate,
+                  dirPath: isDir ? node.path : undefined,
+                })
+              }
+              style={{ paddingLeft: 8 + depth * 12 }}
+              className={`group flex items-center gap-1 rounded-md py-1.5 pr-2 text-xs outline-none transition-colors cursor-pointer focus-visible:ring-2 focus-visible:ring-ring ${active ? "bg-primary text-primary-foreground" : "text-foreground hover:bg-accent hover:text-accent-foreground"}`}
+            >
+              <Tooltip>
+                <TooltipTrigger asChild>
+                  <div className="flex min-w-0 flex-1 items-center gap-1.5 text-left">
+                    {isDir ? (
+                      <ChevronDown
+                        size={14}
+                        className={`shrink-0 text-muted-foreground transition-transform ${expanded ? "" : "-rotate-90"}`}
+                      />
+                    ) : (
+                      <span className="w-3.5 shrink-0" />
+                    )}
+                    <span className={`shrink-0 ${active ? "text-primary-foreground" : "text-muted-foreground"}`}>
+                      {isDir ? <Folder size={14} /> : statusIcon(node.status)}
+                    </span>
+                    <span className={`flex-1 truncate ${isDir ? "font-medium" : ""}`}>{node.name}</span>
+                    {!isDir && node.status !== "untracked" && (
+                      <span
+                        className={`shrink-0 rounded border px-1.5 py-0 text-[10px] ${active ? "bg-primary-foreground/20 text-primary-foreground border-primary-foreground/30" : statusBadgeColor(node.status)}`}
+                      >
+                        {statusLabel(node.status)}
+                      </span>
+                    )}
+                  </div>
+                </TooltipTrigger>
+                <TooltipContent side="right" className="max-w-xs">
+                  <p className="text-xs">{node.path}</p>
+                </TooltipContent>
+              </Tooltip>
+              {dirAction && (
+                <Button
+                  variant="ghost"
+                  size="icon"
+                  className="h-5 w-5 shrink-0 opacity-100"
+                  disabled={!!busyAction}
+                  onClick={(e) => {
+                    e.stopPropagation()
+                    dirAction()
+                  }}
+                  title={staged ? "Unstage all files in this directory" : "Stage all files in this directory"}
+                >
+                  {staged ? <Minus size={12} /> : <Plus size={12} />}
+                </Button>
+              )}
+            </div>
+            {isDir && expanded && renderGitTreeNodes(node.children, depth + 1, onNavigate, staged)}
+          </div>
+        )
+      })}
+    </>
   )
 
   const sidebarContent = (onNavigate: () => void) => (
-    <>
-      <Collapsible
-        open={openSections.changes}
-        onOpenChange={o => setOpenSections(s => ({ ...s, changes: o }))}
-      >
-        {sectionHeader("changes", <FilePen size={13} />, "Changes", changesFiles.length)}
-        <CollapsibleContent>
+    <Tabs defaultValue="changes" className="flex flex-col">
+      <TabsList className="mx-2 mt-2 grid grid-cols-3">
+        <TabsTrigger value="changes" className="text-xs">
+          Changes <span className="ml-1 rounded border border-border bg-muted px-1.5 py-0 text-[10px] tabular-nums text-muted-foreground">{changesFiles.length}</span>
+        </TabsTrigger>
+        <TabsTrigger value="staged" className="text-xs">
+          Staged <span className="ml-1 rounded border border-border bg-muted px-1.5 py-0 text-[10px] tabular-nums text-muted-foreground">{stagedFiles.length}</span>
+        </TabsTrigger>
+        <TabsTrigger value="all" className="text-xs">
+          All Files <span className="ml-1 rounded border border-border bg-muted px-1.5 py-0 text-[10px] tabular-nums text-muted-foreground">{allFiles.length}</span>
+        </TabsTrigger>
+      </TabsList>
+      <div className="mt-2 space-y-0">
+        <TabsContent value="changes" className="mt-0 px-2">
           {loading && changesFiles.length === 0 ? (
             renderSkeletonRows()
           ) : changesFiles.length === 0 ? (
-            <p className="px-4 py-2 text-[11px] text-muted-foreground">No changes</p>
+            <p className="px-2 py-2 text-[11px] text-muted-foreground">No changes</p>
           ) : (
-            <div className="pb-1">
-              {changesFiles.map(f => renderStatusRow(f, onNavigate))}
-            </div>
+            <div className="pb-1">{renderGitTreeNodes(changesTree, 0, onNavigate, false)}</div>
           )}
-        </CollapsibleContent>
-      </Collapsible>
-
-      <Collapsible
-        open={openSections.staged}
-        onOpenChange={o => setOpenSections(s => ({ ...s, staged: o }))}
-      >
-        {sectionHeader("staged", <GitCommit size={13} />, "Staged", stagedFiles.length)}
-        <CollapsibleContent>
+        </TabsContent>
+        <TabsContent value="staged" className="mt-0 px-2">
           {loading && stagedFiles.length === 0 ? (
             renderSkeletonRows(3)
           ) : stagedFiles.length === 0 ? (
-            <p className="px-4 py-2 text-[11px] text-muted-foreground">Nothing staged</p>
+            <p className="px-2 py-2 text-[11px] text-muted-foreground">Nothing staged</p>
           ) : (
-            <div className="pb-1">
-              {stagedFiles.map(f => renderStatusRow(f, onNavigate))}
-            </div>
+            <div className="pb-1">{renderGitTreeNodes(stagedTree, 0, onNavigate, true)}</div>
           )}
-        </CollapsibleContent>
-      </Collapsible>
-
-      <Collapsible
-        open={openSections.all}
-        onOpenChange={o => setOpenSections(s => ({ ...s, all: o }))}
-      >
-        {sectionHeader("all", <Folder size={13} />, "All Files", allFiles.length)}
-        <CollapsibleContent>
+        </TabsContent>
+        <TabsContent value="all" className="mt-0 px-2">
           {allFiles.length === 0 ? (
             renderSkeletonRows(6)
           ) : (
             <div className="pb-1">{renderTreeNodes(fileTree, 0, onNavigate)}</div>
           )}
-        </CollapsibleContent>
-      </Collapsible>
-    </>
+        </TabsContent>
+      </div>
+    </Tabs>
   )
 
   return (
