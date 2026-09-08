@@ -26,8 +26,10 @@ import {
   Minimize,
   Check,
   Upload,
+  Terminal,
 } from "lucide-react"
 import { Card, CardHeader, CardTitle, CardContent } from "@/components/ui/card"
+import TerminalPanel from "@/components/terminal-panel"
 import { Tabs, TabsList, TabsTrigger, TabsContent } from "@/components/ui/tabs"
 import { Sheet, SheetContent, SheetHeader, SheetTitle, SheetDescription } from "@/components/ui/sheet"
 import { Skeleton } from "@/components/ui/skeleton"
@@ -502,6 +504,7 @@ export default function GitReviewPage() {
   const [allFiles, setAllFiles] = useState<{ path: string; status: string; type?: string }[]>([])
   const [selectedFromAll, setSelectedFromAll] = useState(false)
   const [commitMsg, setCommitMsg] = useState("")
+  const [terminalVisible, setTerminalVisible] = useState(false)
   const [busyAction, setBusyAction] = useState<string | null>(null)
   const [actionResult, setActionResult] = useState<{ ok: boolean; message: string } | null>(null)
   const diffCardRef = useRef<HTMLDivElement>(null)
@@ -539,6 +542,10 @@ export default function GitReviewPage() {
     localStorage.setItem("git-review-dark", String(next))
   }, [])
 
+  const toggleTerminal = useCallback(() => {
+    setTerminalVisible(v => !v)
+  }, [])
+
   // --- Sidebar behavior ----------------------------------------------------
 
   // Restore persisted sidebar geometry once on mount. (Set-state is
@@ -574,16 +581,21 @@ export default function GitReviewPage() {
   }, [])
 
   // Ctrl/Cmd+B toggles the sidebar (VS Code muscle memory).
+  // Ctrl+` toggles the terminal.
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "b") {
         e.preventDefault()
         toggleSidebar()
       }
+      if (e.ctrlKey && e.key === "`") {
+        e.preventDefault()
+        toggleTerminal()
+      }
     }
     window.addEventListener("keydown", onKey)
     return () => window.removeEventListener("keydown", onKey)
-  }, [toggleSidebar])
+  }, [toggleSidebar, toggleTerminal])
 
   // Drag the sidebar's right edge to resize (clamped 200–400px, persisted
   // on release). Double-clicking the handle resets to the default width.
@@ -1099,6 +1111,16 @@ export default function GitReviewPage() {
                 {actionResult.message}
               </span>
             )}
+            <Button
+              variant={terminalVisible ? "default" : "outline"}
+              size="sm"
+              onClick={toggleTerminal}
+              className="gap-2"
+              title="Toggle terminal (Ctrl+`)"
+            >
+              <Terminal size={14} />
+              <span className="hidden sm:inline">Terminal</span>
+            </Button>
             <Button variant="outline" size="sm" onClick={() => toggleTheme()} className="gap-2">
               {isDark ? <Sun size={14} /> : <Moon size={14} />}
               <span className="hidden sm:inline">{isDark ? "Light" : "Dark"}</span>
@@ -1121,6 +1143,7 @@ export default function GitReviewPage() {
                   setFiles([])
                   setAllFiles([])
                   setExpandedDirs(new Set())
+                  setTerminalVisible(false)
                   loadStatus(e.target.value)
                 }}
                 title={repoPath}
@@ -1201,7 +1224,10 @@ export default function GitReviewPage() {
 
           {/* Diff viewer: fills the remaining space, no max-width constraint */}
           <main className="flex min-w-0 flex-1 flex-col overflow-hidden p-2 sm:p-4">
-            <Card ref={diffCardRef} className="diff-card flex min-h-0 flex-1 flex-col overflow-hidden">
+            {terminalVisible ? (
+              <TerminalPanel repoPath={repoPath} visible={terminalVisible} isDark={isDark} />
+            ) : (
+              <Card ref={diffCardRef} className="diff-card flex min-h-0 flex-1 flex-col overflow-hidden">
               <CardHeader className="shrink-0 p-3 pb-2">
                 <div className="flex items-center justify-between gap-2">
                   <CardTitle className="truncate text-sm">
@@ -1325,6 +1351,7 @@ export default function GitReviewPage() {
                 </ScrollArea>
               </CardContent>
             </Card>
+            )}
           </main>
         </div>
 
