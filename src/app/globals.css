@@ -171,3 +171,7 @@ body {
 .diff-card:fullscreen .diff-scroll {
   height: 100%;
 }
+.diff-card:fullscreen textarea {
+  flex: 1;
+  min-height: 0;
+}

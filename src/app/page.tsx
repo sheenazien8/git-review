@@ -26,6 +26,7 @@ import {
   Minimize,
   Check,
   Upload,
+  Save,
 } from "lucide-react"
 import { Card, CardHeader, CardTitle, CardContent } from "@/components/ui/card"
 import { Tabs, TabsList, TabsTrigger, TabsContent } from "@/components/ui/tabs"
@@ -234,6 +235,21 @@ function statusLabel(s: string) {
     case "renamed": return "Renamed"
     default: return "Unknown"
   }
+}
+
+const BINARY_EXTS = new Set([
+  ".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp", ".ico",
+  ".pdf", ".zip", ".tar", ".gz", ".rar", ".7z",
+  ".mp3", ".mp4", ".avi", ".mov",
+  ".woff", ".woff2", ".ttf", ".otf", ".eot",
+  ".wasm", ".so", ".dll", ".exe", ".dylib",
+])
+
+function isBinaryFile(file: string) {
+  const extIndex = file.lastIndexOf(".")
+  if (extIndex === -1) return false
+  const ext = file.slice(extIndex).toLowerCase()
+  return BINARY_EXTS.has(ext)
 }
 
 // ---------------------------------------------------------------------------
@@ -479,6 +495,74 @@ function MarkdownView({ content }: { content: string }) {
   )
 }
 
+function EditView({ content, file, onChange }: { content: string; file: string; onChange: (v: string) => void }) {
+  const textareaRef = useRef<HTMLTextAreaElement>(null)
+  const preRef = useRef<HTMLPreElement>(null)
+  const gutterRef = useRef<HTMLDivElement>(null)
+
+  const ext = file.split(".").pop()?.toLowerCase() ?? ""
+  const lang = extToLang[ext]
+
+  const highlightedHtml = useMemo(() => {
+    try {
+      if (lang && hljs.getLanguage(lang)) {
+        return hljs.highlight(content, { language: lang, ignoreIllegals: true }).value
+      }
+      return hljs.highlightAuto(content).value
+    } catch {
+      return content
+        .replace(/&/g, "&amp;")
+        .replace(/</g, "&lt;")
+        .replace(/>/g, "&gt;")
+    }
+  }, [content, lang])
+
+  const lines = useMemo(() => content.split("\n"), [content])
+
+  const handleScroll = useCallback(() => {
+    const ta = textareaRef.current
+    if (!ta || !preRef.current || !gutterRef.current) return
+    preRef.current.scrollTop = ta.scrollTop
+    preRef.current.scrollLeft = ta.scrollLeft
+    gutterRef.current.scrollTop = ta.scrollTop
+  }, [])
+
+  return (
+    <div className="flex h-full text-xs font-mono">
+      <div
+        ref={gutterRef}
+        className="shrink-0 select-none overflow-hidden border-r border-border bg-muted/30 py-4 pr-2 pl-3 text-right text-muted-foreground leading-5"
+      >
+        {lines.map((_, i) => (
+          <div key={i} className="h-5">{i + 1}</div>
+        ))}
+      </div>
+      <div className="relative flex-1">
+        <pre
+          ref={preRef}
+          className="absolute inset-0 m-0 overflow-hidden p-4 leading-5"
+          style={{ whiteSpace: "pre", overflowWrap: "normal", wordWrap: "normal", tabSize: 2 }}
+        >
+          <code className="hljs p-0! bg-transparent!" dangerouslySetInnerHTML={{ __html: highlightedHtml }} />
+          {/* Pad with extra newlines so the pre element always has a bit more
+              scrollable height than the textarea, keeping cursor alignment
+              accurate at the end of the file. */}
+          <span dangerouslySetInnerHTML={{ __html: "\n\n\n\n\n\n\n\n\n\n" }} />
+        </pre>
+        <textarea
+          ref={textareaRef}
+          className="absolute inset-0 h-full w-full resize-none bg-transparent p-4 leading-5 text-transparent outline-none"
+          style={{ whiteSpace: "pre", overflowWrap: "normal", wordWrap: "normal", tabSize: 2, caretColor: "var(--foreground)" }}
+          value={content}
+          onChange={e => onChange(e.target.value)}
+          onScroll={handleScroll}
+          spellCheck={false}
+        />
+      </div>
+    </div>
+  )
+}
+
 export default function GitReviewPage() {
   const isDark = useSyncExternalStore(subscribeToTheme, isThemeDark, isThemeDarkServer)
   // Seed with the first project so the client always knows the active repo
@@ -506,6 +590,11 @@ export default function GitReviewPage() {
   const [actionResult, setActionResult] = useState<{ ok: boolean; message: string } | null>(null)
   const diffCardRef = useRef<HTMLDivElement>(null)
   const [isFullscreen, setIsFullscreen] = useState(false)
+  const [editMode, setEditMode] = useState(false)
+  const [editContent, setEditContent] = useState("")
+  const prevViewModeRef = useRef<"unified" | "split" | "raw" | null>(null)
+  const [isSaving, setIsSaving] = useState(false)
+  const saveFileRef = useRef<() => Promise<void>>(async () => {})
 
   // --- Sidebar (VS Code-style) state --------------------------------------
   const [sidebarOpen, setSidebarOpen] = useState(true)
@@ -580,10 +669,16 @@ export default function GitReviewPage() {
         e.preventDefault()
         toggleSidebar()
       }
+      if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "s") {
+        if (editMode) {
+          e.preventDefault()
+          saveFileRef.current()
+        }
+      }
     }
     window.addEventListener("keydown", onKey)
     return () => window.removeEventListener("keydown", onKey)
-  }, [toggleSidebar])
+  }, [toggleSidebar, editMode])
 
   // Drag the sidebar's right edge to resize (clamped 200–400px, persisted
   // on release). Double-clicking the handle resets to the default width.
@@ -650,7 +745,7 @@ export default function GitReviewPage() {
     }
   }, [repoPath, loadAllFiles])
 
-  const loadRaw = useCallback(async (file: string) => {
+  const loadRaw = useCallback(async (file: string): Promise<string> => {
     setRawFile(file)
     setRawError("")
     try {
@@ -659,12 +754,15 @@ export default function GitReviewPage() {
       if (data.error) {
         setRawError(data.error)
         setRawContent("")
+        return ""
       } else {
         setRawContent(data.content ?? "")
+        return data.content ?? ""
       }
     } catch (e) {
       setRawError(e instanceof Error ? e.message : "Failed to read file")
       setRawContent("")
+      return ""
     }
   }, [repoPath])
 
@@ -710,6 +808,8 @@ export default function GitReviewPage() {
       setRawContent("")
       setRawFile("")
       setRawError("")
+      setEditMode(false)
+      setEditContent("")
       // Check if this file has uncommitted changes (modified/staged/deleted/renamed)
       const changedFile = files.find(f => f.path === filePath)
       if (changedFile) {
@@ -746,6 +846,8 @@ export default function GitReviewPage() {
     setRawContent("")
     setRawFile("")
     setRawError("")
+    setEditMode(false)
+    setEditContent("")
     setDiffLoading(true)
     // If we're already in raw mode, fetch the new file's content right away
     // instead of leaving a spinner until the Raw button is clicked again.
@@ -811,6 +913,75 @@ export default function GitReviewPage() {
       setMdContent("")
     }
   }, [repoPath])
+
+  const canEdit = useCallback((file: string | null) => {
+    if (!file) return false
+    if (isBinaryFile(file)) return false
+    const f = files.find(gf => gf.path === file)
+    if (f?.status === "deleted") return false
+    return true
+  }, [files])
+
+  const toggleEditMode = useCallback(async () => {
+    if (!editMode) {
+      if (!selectedFile || !canEdit(selectedFile)) return
+      let content = rawContent
+      if (rawFile !== selectedFile) {
+        content = await loadRaw(selectedFile)
+      }
+      prevViewModeRef.current = viewMode
+      setMdRender(false)
+      setEditContent(content)
+      setEditMode(true)
+    } else {
+      setEditMode(false)
+      setEditContent("")
+      const prev = prevViewModeRef.current
+      if (prev) {
+        setViewMode(prev)
+        prevViewModeRef.current = null
+      } else {
+        setViewMode("raw")
+      }
+    }
+  }, [editMode, selectedFile, canEdit, viewMode, rawContent, rawFile, loadRaw])
+
+  const saveFile = useCallback(async () => {
+    if (!selectedFile || editContent === rawContent) return
+    setIsSaving(true)
+    setActionResult(null)
+    try {
+      const res = await fetch(`/api/git/content?repo=${encodeURIComponent(repoPath)}&file=${encodeURIComponent(selectedFile)}`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ content: editContent }),
+      })
+      const data = await res.json()
+      if (data.error) {
+        setActionResult({ ok: false, message: data.error })
+      } else {
+        setActionResult({ ok: true, message: "File saved" })
+        setEditMode(false)
+        setEditContent("")
+        setRawContent(editContent)
+        const prev = prevViewModeRef.current
+        if (prev) {
+          setViewMode(prev)
+          prevViewModeRef.current = null
+        }
+        await loadStatus()
+        await loadRaw(selectedFile)
+      }
+    } catch (e) {
+      setActionResult({ ok: false, message: e instanceof Error ? e.message : "Failed to save file" })
+    } finally {
+      setIsSaving(false)
+    }
+  }, [selectedFile, editContent, rawContent, repoPath, loadStatus, loadRaw])
+
+  useEffect(() => {
+    saveFileRef.current = saveFile
+  }, [saveFile])
 
   const didInitialLoadRef = useRef(false)
   useEffect(() => {
@@ -1209,7 +1380,19 @@ export default function GitReviewPage() {
                   </CardTitle>
                   {selectedFile && (
                     <div className="flex items-center gap-1">
-                      {!selectedFromAll && (
+                      {editMode && (
+                        <Button
+                          variant="default"
+                          size="sm"
+                          className="h-7 gap-1"
+                          disabled={editContent === rawContent || isSaving}
+                          onClick={saveFile}
+                        >
+                          {isSaving ? <RefreshCw size={13} className="animate-spin" /> : <Save size={13} />}
+                          Save
+                        </Button>
+                      )}
+                      {!selectedFromAll && !editMode && (
                         <Tooltip>
                           <TooltipTrigger asChild>
                             <Button
@@ -1231,7 +1414,7 @@ export default function GitReviewPage() {
                           <TooltipContent side="left">{selectedStaged ? "Unstage this file" : "Stage this file"}</TooltipContent>
                         </Tooltip>
                       )}
-                      {isMarkdownFile(selectedFile) && (
+                      {isMarkdownFile(selectedFile) && !editMode && (
                         <Button
                           variant={mdRender ? "default" : "outline"}
                           size="icon"
@@ -1245,7 +1428,39 @@ export default function GitReviewPage() {
                           <Eye size={13} />
                         </Button>
                       )}
-                      {!selectedFromAll && (
+                      {canEdit(selectedFile) && !editMode && (
+                        <Tooltip>
+                          <TooltipTrigger asChild>
+                            <Button
+                              variant="outline"
+                              size="icon"
+                              className="h-7 w-7"
+                              title="Edit file"
+                              onClick={toggleEditMode}
+                            >
+                              <FilePen size={13} />
+                            </Button>
+                          </TooltipTrigger>
+                          <TooltipContent side="left">Edit file</TooltipContent>
+                        </Tooltip>
+                      )}
+                      {editMode && (
+                        <Tooltip>
+                          <TooltipTrigger asChild>
+                            <Button
+                              variant="outline"
+                              size="icon"
+                              className="h-7 w-7"
+                              title="Cancel editing"
+                              onClick={toggleEditMode}
+                            >
+                              <Minus size={13} />
+                            </Button>
+                          </TooltipTrigger>
+                          <TooltipContent side="left">Cancel editing</TooltipContent>
+                        </Tooltip>
+                      )}
+                      {!selectedFromAll && !editMode && (
                         <>
                           <Button
                             variant={viewMode === "raw" ? "default" : "outline"}
@@ -1285,44 +1500,52 @@ export default function GitReviewPage() {
               </CardHeader>
               <Separator />
               <CardContent className="diff-content min-h-0 flex-1 p-0">
-                <ScrollArea className="diff-scroll h-full">
-                  {diffLoading && !selectedFromAll ? (
-                    <div className="flex items-center justify-center h-32">
-                      <RefreshCw size={20} className="animate-spin text-muted-foreground" />
-                    </div>
-                  ) : selectedFromAll && selectedFile ? (
-                    mdRender && isMarkdownFile(selectedFile) ? (
+                {editMode && selectedFile ? (
+                  <EditView
+                    content={editContent}
+                    file={selectedFile}
+                    onChange={setEditContent}
+                  />
+                ) : (
+                  <ScrollArea className="diff-scroll h-full">
+                    {diffLoading && !selectedFromAll ? (
+                      <div className="flex items-center justify-center h-32">
+                        <RefreshCw size={20} className="animate-spin text-muted-foreground" />
+                      </div>
+                    ) : selectedFromAll && selectedFile ? (
+                      mdRender && isMarkdownFile(selectedFile) ? (
+                        <MarkdownView content={mdContent} />
+                      ) : rawError ? (
+                        <div className="p-4 text-sm text-destructive whitespace-pre-wrap break-words">{rawError}</div>
+                      ) : rawContent ? (
+                        <CodeView content={rawContent} file={selectedFile} fullPath={selectedFullPath} />
+                      ) : (
+                        <div className="flex items-center justify-center h-32">
+                          <RefreshCw size={20} className="animate-spin text-muted-foreground" />
+                        </div>
+                      )
+                    ) : mdRender && isMarkdownFile(selectedFile ?? "") ? (
                       <MarkdownView content={mdContent} />
-                    ) : rawError ? (
-                      <div className="p-4 text-sm text-destructive whitespace-pre-wrap break-words">{rawError}</div>
-                    ) : rawContent ? (
-                      <CodeView content={rawContent} file={selectedFile} fullPath={selectedFullPath} />
+                    ) : viewMode === "raw" && selectedFile ? (
+                      rawError ? (
+                        <div className="p-4 text-sm text-destructive whitespace-pre-wrap break-words">{rawError}</div>
+                      ) : rawContent ? (
+                        <CodeView content={rawContent} file={selectedFile} fullPath={selectedFullPath} />
+                      ) : (
+                        <div className="flex items-center justify-center h-32">
+                          <RefreshCw size={20} className="animate-spin text-muted-foreground" />
+                        </div>
+                      )
+                    ) : fileDiff ? (
+                      <DiffView raw={fileDiff} view={viewMode === "split" ? "split" : "unified"} fullPath={selectedFullPath} />
                     ) : (
-                      <div className="flex items-center justify-center h-32">
-                        <RefreshCw size={20} className="animate-spin text-muted-foreground" />
+                      <div className="flex flex-col items-center justify-center h-40 text-muted-foreground">
+                        <GitCommit size={24} />
+                        <p className="text-sm mt-2">Select a file to view diff</p>
                       </div>
-                    )
-                  ) : mdRender && isMarkdownFile(selectedFile ?? "") ? (
-                    <MarkdownView content={mdContent} />
-                  ) : viewMode === "raw" && selectedFile ? (
-                    rawError ? (
-                      <div className="p-4 text-sm text-destructive whitespace-pre-wrap break-words">{rawError}</div>
-                    ) : rawContent ? (
-                      <CodeView content={rawContent} file={selectedFile} fullPath={selectedFullPath} />
-                    ) : (
-                      <div className="flex items-center justify-center h-32">
-                        <RefreshCw size={20} className="animate-spin text-muted-foreground" />
-                      </div>
-                    )
-                  ) : fileDiff ? (
-                    <DiffView raw={fileDiff} view={viewMode === "split" ? "split" : "unified"} fullPath={selectedFullPath} />
-                  ) : (
-                    <div className="flex flex-col items-center justify-center h-40 text-muted-foreground">
-                      <GitCommit size={24} />
-                      <p className="text-sm mt-2">Select a file to view diff</p>
-                    </div>
-                  )}
-                </ScrollArea>
+                    )}
+                  </ScrollArea>
+                )}
               </CardContent>
             </Card>
           </main>
