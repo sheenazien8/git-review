@@ -1,16 +1,19 @@
 import { NextRequest, NextResponse } from "next/server"
 import { execFile } from "child_process"
 import { promisify } from "util"
+import path from "path"
+import { access } from "fs/promises"
 
 const execFileAsync = promisify(execFile)
 
 const DEFAULT_REPO = "/mnt/storage/Documents/Code/antikode/yamaha-golang-api"
 
 interface ActionBody {
-  action: "add" | "addAll" | "unstage" | "unstageAll" | "commit" | "push"
+  action: "add" | "addAll" | "unstage" | "unstageAll" | "commit" | "push" | "create" | "delete"
   repo?: string
   files?: string[]
   message?: string
+  path?: string
 }
 
 const MAX_BUFFER = 10 * 1024 * 1024
@@ -19,12 +22,19 @@ function output(r: { stdout: string; stderr: string }) {
   return (r.stdout || r.stderr).trim()
 }
 
-// `git reset --` cannot unstage in a repo that has no commits yet (no HEAD to
-// reset to) — there `git rm --cached` is the correct way to empty the index.
 function isUnbornHead(e: unknown): boolean {
   const stderr = (e as { stderr?: string }).stderr || ""
   const msg = stderr || (e instanceof Error ? e.message : "")
   return /Failed to resolve 'HEAD'|unborn|bad revision|unknown revision/i.test(msg)
+}
+
+async function validatePath(repo: string, filePath: string): Promise<string | null> {
+  const repoRoot = path.resolve(repo)
+  const resolved = path.resolve(repoRoot, filePath)
+  if (!resolved.startsWith(repoRoot + path.sep)) {
+    return null
+  }
+  return resolved
 }
 
 export async function POST(req: NextRequest) {
@@ -93,7 +103,6 @@ export async function POST(req: NextRequest) {
           const r = await execFileAsync("git", ["push"], opts)
           return NextResponse.json({ success: true, message: output(r) || "Pushed" })
         } catch (e) {
-          // Branch has no upstream yet — set it on first push
           const stderr = (e as { stderr?: string }).stderr || ""
           if (/no upstream|set-upstream/i.test(stderr)) {
             const r = await execFileAsync("git", ["push", "-u", "origin", "HEAD"], opts)
@@ -101,6 +110,41 @@ export async function POST(req: NextRequest) {
           }
           throw e
         }
+      }
+
+      case "create": {
+        const filePath = (body.path || "").trim()
+        if (!filePath) {
+          return NextResponse.json({ error: "File path is required" }, { status: 400 })
+        }
+        const validatedPath = await validatePath(repo, filePath)
+        if (!validatedPath) {
+          return NextResponse.json({ error: "Invalid file path" }, { status: 400 })
+        }
+        try {
+          await access(validatedPath)
+          return NextResponse.json({ error: "File already exists" }, { status: 409 })
+        } catch {
+          // File doesn't exist, good
+        }
+        await execFileAsync("touch", [validatedPath])
+        return NextResponse.json({ success: true, message: `Created ${filePath}` })
+      }
+
+      case "delete": {
+        if (!files || files.length === 0) {
+          return NextResponse.json({ error: "No file specified" }, { status: 400 })
+        }
+        const validatedFiles: string[] = []
+        for (const file of files) {
+          const validated = await validatePath(repo, file)
+          if (!validated) {
+            return NextResponse.json({ error: `Invalid file path: ${file}` }, { status: 400 })
+          }
+          validatedFiles.push(validated)
+        }
+        await execFileAsync("rm", ["-f", ...validatedFiles])
+        return NextResponse.json({ success: true, message: `Deleted ${files.length} file${files.length > 1 ? "s" : ""}` })
       }
 
       default:

@@ -7,6 +7,7 @@ import {
   FilePen,
   FilePlus,
   FileMinus,
+  Trash2,
   File,
   ChevronRight,
   ChevronDown,
@@ -27,6 +28,7 @@ import {
   Check,
   Upload,
   Save,
+  X,
 } from "lucide-react"
 import { Card, CardHeader, CardTitle, CardContent } from "@/components/ui/card"
 import { Tabs, TabsList, TabsTrigger, TabsContent } from "@/components/ui/tabs"
@@ -37,6 +39,15 @@ import { Badge } from "@/components/ui/badge"
 import { ScrollArea } from "@/components/ui/scroll-area"
 import { Separator } from "@/components/ui/separator"
 import { Tooltip, TooltipTrigger, TooltipContent, TooltipProvider } from "@/components/ui/tooltip"
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog"
+import { Input } from "@/components/ui/input"
 import projects from "../../projects.json"
 import Markdown from "react-markdown"
 import remarkGfm from "remark-gfm"
@@ -595,6 +606,11 @@ export default function GitReviewPage() {
   const prevViewModeRef = useRef<"unified" | "split" | "raw" | null>(null)
   const [isSaving, setIsSaving] = useState(false)
   const saveFileRef = useRef<() => Promise<void>>(async () => {})
+  // Dialog states
+  const [createFileOpen, setCreateFileOpen] = useState(false)
+  const [createFileName, setCreateFileName] = useState("")
+  const [deleteFileOpen, setDeleteFileOpen] = useState(false)
+  const [fileToDelete, setFileToDelete] = useState<string | null>(null)
 
   // --- Sidebar (VS Code-style) state --------------------------------------
   const [sidebarOpen, setSidebarOpen] = useState(true)
@@ -864,8 +880,8 @@ export default function GitReviewPage() {
   }, [repoPath, viewMode, loadRaw, expandAncestors])
 
   const runAction = useCallback(async (
-    action: "add" | "addAll" | "unstage" | "unstageAll" | "commit" | "push",
-    payload?: { files?: string[]; message?: string }
+    action: "add" | "addAll" | "unstage" | "unstageAll" | "commit" | "push" | "create" | "delete",
+    payload?: { files?: string[]; message?: string; path?: string }
   ) => {
     setBusyAction(action)
     setActionResult(null)
@@ -895,6 +911,13 @@ export default function GitReviewPage() {
           const diffRes = await fetch(`/api/git/diff?repo=${encodeURIComponent(repoPath)}&file=${encodeURIComponent(selectedFile)}&staged=${nowStaged ? 1 : 0}`)
           const diffData = await diffRes.json()
           setFileDiff(diffData.diff || "")
+        }
+        // Refresh all-files list after create/delete
+        if (action === "create" || action === "delete") {
+          loadAllFiles()
+          if (action === "create" && payload?.path) {
+            selectFromTree(payload.path)
+          }
         }
       }
     } catch (e) {
@@ -983,6 +1006,34 @@ export default function GitReviewPage() {
     saveFileRef.current = saveFile
   }, [saveFile])
 
+  const handleCreateFile = useCallback(async () => {
+    if (!createFileName.trim()) return
+    setCreateFileOpen(false)
+    await runAction("create", { path: createFileName.trim() })
+    setCreateFileName("")
+  }, [createFileName, runAction])
+
+  const handleDeleteFile = useCallback(async () => {
+    if (!fileToDelete) return
+    setDeleteFileOpen(false)
+    const wasSelected = selectedFile === fileToDelete
+    await runAction("delete", { files: [fileToDelete] })
+    if (wasSelected) {
+      setSelectedFile(null)
+      setFileDiff("")
+      setRawContent("")
+      setRawFile("")
+      setEditMode(false)
+      setEditContent("")
+    }
+    setFileToDelete(null)
+  }, [fileToDelete, selectedFile, runAction])
+
+  const openDeleteDialog = useCallback((filePath: string) => {
+    setFileToDelete(filePath)
+    setDeleteFileOpen(true)
+  }, [])
+
   const didInitialLoadRef = useRef(false)
   useEffect(() => {
     if (didInitialLoadRef.current) return
@@ -1064,7 +1115,7 @@ export default function GitReviewPage() {
                 })
               }
               style={{ paddingLeft: 8 + depth * 12 }}
-              className={`group flex items-center gap-1 rounded-md py-1.5 pr-2 text-xs outline-none transition-colors cursor-pointer focus-visible:ring-2 focus-visible:ring-ring ${active ? "bg-primary text-primary-foreground" : "text-foreground hover:bg-accent hover:text-accent-foreground"}`}
+              className={`group flex items-center gap-1 rounded-md py-1.5 pr-1 text-xs outline-none transition-colors cursor-pointer focus-visible:ring-2 focus-visible:ring-ring ${active ? "bg-primary text-primary-foreground" : "text-foreground hover:bg-accent hover:text-accent-foreground"}`}
             >
               <Tooltip>
                 <TooltipTrigger asChild>
@@ -1094,6 +1145,21 @@ export default function GitReviewPage() {
                   <p className="text-xs">{node.path}</p>
                 </TooltipContent>
               </Tooltip>
+              {!isDir && (
+                <Button
+                  variant="ghost"
+                  size="icon"
+                  className="h-5 w-5 shrink-0 opacity-0 group-hover:opacity-100 text-muted-foreground hover:text-destructive"
+                  disabled={!!busyAction}
+                  onClick={(e) => {
+                    e.stopPropagation()
+                    openDeleteDialog(node.path)
+                  }}
+                  title="Delete file"
+                >
+                  <Trash2 size={12} />
+                </Button>
+              )}
             </div>
             {isDir && expanded && renderTreeNodes(node.children, depth + 1, onNavigate)}
           </div>
@@ -1138,7 +1204,7 @@ export default function GitReviewPage() {
                 })
               }
               style={{ paddingLeft: 8 + depth * 12 }}
-              className={`group flex items-center gap-1 rounded-md py-1.5 pr-2 text-xs outline-none transition-colors cursor-pointer focus-visible:ring-2 focus-visible:ring-ring ${active ? "bg-primary text-primary-foreground" : "text-foreground hover:bg-accent hover:text-accent-foreground"}`}
+              className={`group flex items-center gap-1 rounded-md py-1.5 pr-1 text-xs outline-none transition-colors cursor-pointer focus-visible:ring-2 focus-visible:ring-ring ${active ? "bg-primary text-primary-foreground" : "text-foreground hover:bg-accent hover:text-accent-foreground"}`}
             >
               <Tooltip>
                 <TooltipTrigger asChild>
@@ -1274,6 +1340,19 @@ export default function GitReviewPage() {
               {isDark ? <Sun size={14} /> : <Moon size={14} />}
               <span className="hidden sm:inline">{isDark ? "Light" : "Dark"}</span>
             </Button>
+            <Tooltip>
+              <TooltipTrigger asChild>
+                <Button
+                  variant="outline"
+                  size="icon"
+                  className="h-9 w-9"
+                  onClick={() => setCreateFileOpen(true)}
+                >
+                  <FilePlus size={16} />
+                </Button>
+              </TooltipTrigger>
+              <TooltipContent side="bottom">New File</TooltipContent>
+            </Tooltip>
           </div>
 
           {/* Repo selector + git actions */}
@@ -1444,6 +1523,22 @@ export default function GitReviewPage() {
                           <TooltipContent side="left">Edit file</TooltipContent>
                         </Tooltip>
                       )}
+                      {selectedFromAll && selectedFile && !editMode && (
+                        <Tooltip>
+                          <TooltipTrigger asChild>
+                            <Button
+                              variant="outline"
+                              size="icon"
+                              className="h-7 w-7 text-destructive hover:text-destructive"
+                              title="Delete file"
+                              onClick={() => openDeleteDialog(selectedFile)}
+                            >
+                              <Trash2 size={13} />
+                            </Button>
+                          </TooltipTrigger>
+                          <TooltipContent side="left">Delete file</TooltipContent>
+                        </Tooltip>
+                      )}
                       {editMode && (
                         <Tooltip>
                           <TooltipTrigger asChild>
@@ -1568,6 +1663,63 @@ export default function GitReviewPage() {
             </div>
           </SheetContent>
         </Sheet>
+
+        {/* Create File Dialog */}
+        <Dialog open={createFileOpen} onOpenChange={setCreateFileOpen}>
+          <DialogContent className="sm:max-w-[425px]">
+            <DialogHeader>
+              <DialogTitle>Create New File</DialogTitle>
+              <DialogDescription>
+                Enter the file path relative to the repository root.
+              </DialogDescription>
+            </DialogHeader>
+            <div className="py-4">
+              <Input
+                placeholder="path/to/new-file.txt"
+                value={createFileName}
+                onChange={e => setCreateFileName(e.target.value)}
+                onKeyDown={e => {
+                  if (e.key === "Enter") handleCreateFile()
+                }}
+                autoFocus
+              />
+            </div>
+            <DialogFooter>
+              <Button variant="outline" onClick={() => setCreateFileOpen(false)}>
+                Cancel
+              </Button>
+              <Button onClick={handleCreateFile} disabled={!createFileName.trim() || busyAction === "create"}>
+                {busyAction === "create" ? <RefreshCw size={14} className="animate-spin mr-2" /> : null}
+                Create
+              </Button>
+            </DialogFooter>
+          </DialogContent>
+        </Dialog>
+
+        {/* Delete File Dialog */}
+        <Dialog open={deleteFileOpen} onOpenChange={setDeleteFileOpen}>
+          <DialogContent className="sm:max-w-[425px]">
+            <DialogHeader>
+              <DialogTitle>Delete File</DialogTitle>
+              <DialogDescription>
+                Are you sure you want to delete <code className="bg-muted px-1 rounded">{fileToDelete}</code>? This action cannot be undone.
+              </DialogDescription>
+            </DialogHeader>
+            <DialogFooter className="gap-2 sm:gap-0">
+              <Button variant="outline" onClick={() => setDeleteFileOpen(false)}>
+                Cancel
+              </Button>
+              <Button
+                variant="destructive"
+                onClick={handleDeleteFile}
+                disabled={busyAction === "delete"}
+              >
+                {busyAction === "delete" ? <RefreshCw size={14} className="animate-spin mr-2" /> : <Trash2 size={14} className="mr-2" />}
+                Delete
+              </Button>
+            </DialogFooter>
+          </DialogContent>
+        </Dialog>
       </div>
     </TooltipProvider>
   )
