@@ -57,7 +57,7 @@ export async function GET(req: NextRequest) {
         continue
       }
 
-      const [newPath, renameFrom] = path.split(" -> ")
+      const [renameFrom, newPath] = path.split(" -> ")
       const filePath = newPath || path
 
       // A file can have both staged and unstaged changes ("MM", "AM", …) —

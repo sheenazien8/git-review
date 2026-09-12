@@ -58,7 +58,9 @@ export interface DiffLine {
 
 export function parseDiff(raw: string): DiffHunk[] {
   const hunks: DiffHunk[] = []
-  const lines = raw.split("\n")
+  // Git diff output ends with a trailing newline; splitting on "\n" produces
+  // an extra empty string that would be parsed as a bogus context line.
+  const lines = raw.replace(/\n$/, "").split("\n")
   let currentHunk: DiffHunk | null = null
   let oldLine = 0
   let newLine = 0

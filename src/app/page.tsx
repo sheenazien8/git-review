@@ -1,6 +1,7 @@
 "use client"
 
 import { useState, useCallback, useEffect, useMemo, useRef, useSyncExternalStore } from "react"
+import { parseDiff } from "@/lib/utils"
 import {
   GitBranch,
   GitCommit,
@@ -29,6 +30,7 @@ import {
   Upload,
   Save,
   X,
+  Search,
 } from "lucide-react"
 import { Card, CardHeader, CardTitle, CardContent } from "@/components/ui/card"
 import { Tabs, TabsList, TabsTrigger, TabsContent } from "@/components/ui/tabs"
@@ -80,47 +82,7 @@ interface GitFile {
   oldPath?: string
 }
 
-interface DiffLine {
-  type: "add" | "remove" | "context"
-  content: string
-  oldLineNo?: number
-  newLineNo?: number
-}
 
-interface DiffHunk {
-  header: string
-  lines: DiffLine[]
-}
-
-function parseDiff(raw: string): DiffHunk[] {
-  const hunks: DiffHunk[] = []
-  const lines = raw.split("\n")
-  let currentHunk: DiffHunk | null = null
-  let oldLine = 0
-  let newLine = 0
-
-  for (const line of lines) {
-    if (line.startsWith("@@")) {
-      if (currentHunk) hunks.push(currentHunk)
-      const m = line.match(/@@ -(\d+)(?:,\d+)? \+(\d+)(?:,\d+)? @@/)
-      oldLine = m ? parseInt(m[1]) : 0
-      newLine = m ? parseInt(m[2]) : 0
-      currentHunk = { header: line, lines: [] }
-    } else if (currentHunk) {
-      if (line.startsWith("+")) {
-        currentHunk.lines.push({ type: "add", content: line, newLineNo: newLine++ })
-      } else if (line.startsWith("-")) {
-        currentHunk.lines.push({ type: "remove", content: line, oldLineNo: oldLine++ })
-      } else if (!line.startsWith("\\")) {
-        currentHunk.lines.push({ type: "context", content: line, oldLineNo: oldLine++, newLineNo: newLine++ })
-      }
-    }
-  }
-  if (currentHunk) hunks.push(currentHunk)
-  return hunks
-}
-
-// Copies text to the clipboard, falling back to a hidden textarea for
 // contexts where the async Clipboard API is unavailable (non-secure origin).
 async function copyText(text: string) {
   try {
@@ -264,6 +226,84 @@ function isBinaryFile(file: string) {
 }
 
 // ---------------------------------------------------------------------------
+// Buffer / open tabs
+// ---------------------------------------------------------------------------
+
+const TAB_CAP = 20
+const TABS_STORAGE_PREFIX = "git-review-tabs-"
+
+// One open editor. The id is stable for the lifetime of the entry and is the
+// only key used to look up / mutate / remove an entry from the buffer.
+interface BufferEntry {
+  id: string
+  file: string
+  staged: boolean
+  fromAll: boolean
+  diff: string
+  diffLoading: boolean
+  raw: string
+  rawError: string
+  md: string
+  mdRender: boolean
+  viewMode: "unified" | "split" | "raw"
+  editMode: boolean
+  editContent: string
+  // True when editContent has drifted away from the on-disk content.
+  dirty: boolean
+  // Optional rename hint from git status (oldPath → file).
+  oldPath?: string
+}
+
+function makeTabId(repo: string, file: string, staged: boolean, fromAll: boolean) {
+  return `${repo}::${file}::${staged ? "s" : "u"}::${fromAll ? "a" : "d"}`
+}
+
+function tabsStorageKey(repo: string) {
+  // base64 of repoPath keeps weird characters out of the key. The resulting
+  // string is used as a suffix only — atob/btoa are available everywhere.
+  let b64 = ""
+  try {
+    b64 = btoa(repo)
+  } catch {
+    b64 = repo.replace(/[^a-zA-Z0-9_-]/g, "_")
+  }
+  return `${TABS_STORAGE_PREFIX}${b64}`
+}
+
+// Drop fields we don't want to persist — reloading the page always re-fetches
+// content; we only restore the *list* of open tabs and which one is active.
+type PersistedTab = {
+  file: string
+  staged: boolean
+  fromAll: boolean
+}
+type PersistedBuffer = { tabs: PersistedTab[]; activeId: string | null }
+
+function readPersistedBuffer(repo: string): PersistedBuffer | null {
+  try {
+    const raw = localStorage.getItem(tabsStorageKey(repo))
+    if (!raw) return null
+    const parsed = JSON.parse(raw) as PersistedBuffer
+    if (!parsed || !Array.isArray(parsed.tabs)) return null
+    return parsed
+  } catch {
+    return null
+  }
+}
+
+function writePersistedBuffer(repo: string, buffer: BufferEntry[], activeId: string | null) {
+  try {
+    const payload: PersistedBuffer = {
+      tabs: buffer.map(b => ({ file: b.file, staged: b.staged, fromAll: b.fromAll })),
+      activeId,
+    }
+    localStorage.setItem(tabsStorageKey(repo), JSON.stringify(payload))
+  } catch {
+    // localStorage may be unavailable / full — best-effort.
+  }
+}
+
+// ---------------------------------------------------------------------------
 // Sidebar: persisted geometry + All Files tree building
 // ---------------------------------------------------------------------------
 
@@ -288,6 +328,27 @@ interface TreeNode {
 // Builds a nested tree from the flat /api/git/all-files entries (both dirs
 // and files). Dir nodes carry the status the API derived for them. Nodes
 // are sorted dirs-first, then alphabetically, at every level.
+function filterTreeNodes(nodes: TreeNode[], query: string): TreeNode[] {
+  const q = query.trim().toLowerCase()
+  if (!q) return nodes
+  const out: TreeNode[] = []
+  for (const node of nodes) {
+    if (node.type === "file") {
+      if (node.name.toLowerCase().includes(q) || node.path.toLowerCase().includes(q)) {
+        out.push(node)
+      }
+    } else {
+      const filteredChildren = filterTreeNodes(node.children, query)
+      if (filteredChildren.length > 0) {
+        out.push({ ...node, children: filteredChildren })
+      } else if (node.name.toLowerCase().includes(q) || node.path.toLowerCase().includes(q)) {
+        out.push({ ...node, children: [] })
+      }
+    }
+  }
+  return out
+}
+
 function buildTree(entries: { path: string; status: string; type?: string }[]): TreeNode[] {
   const root: TreeNode = { name: "", path: "", type: "dir", status: "", children: [] }
   const dirIndex = new Map<string, TreeNode>([["", root]])
@@ -334,11 +395,25 @@ function DiffView({ raw, view, fullPath }: { raw: string; view: "unified" | "spl
   const hunks = parseDiff(raw)
   const { copiedKey, anchor, click, rangePreview, setHover } = useCopyRange(fullPath)
 
-  if (hunks.length === 0) return <div className="p-4 text-center text-sm text-muted-foreground">No diff output</div>
+  if (hunks.length === 0) {
+    const rename = raw.match(/^rename from (.+)\nrename to (.+)$/m)
+    if (rename) {
+      return (
+        <div className="p-4 text-sm">
+          <div className="rounded border bg-muted/40 p-3 font-mono text-xs">
+            <div className="text-muted-foreground">similarity index 100%</div>
+            <div>rename from <span className="font-semibold">{rename[1]}</span></div>
+            <div>rename to <span className="font-semibold">{rename[2]}</span></div>
+          </div>
+        </div>
+      )
+    }
+    return <div className="p-4 text-center text-sm text-muted-foreground">No diff output</div>
+  }
 
   const addBg = "bg-green-50 text-green-800 dark:bg-green-950 dark:text-green-300"
   const removeBg = "bg-red-50 text-red-800 dark:bg-red-950 dark:text-red-300"
-  const ctxBg = "text-neutral-700 dark:text-neutral-300"
+  const ctxText = "text-neutral-700 dark:text-neutral-300"
   const hunkBg = "bg-blue-50 text-blue-700 dark:bg-blue-950 dark:text-blue-300"
 
   // While a line is anchored, hovering another line previews the range that
@@ -346,81 +421,74 @@ function DiffView({ raw, view, fullPath }: { raw: string; view: "unified" | "spl
   const inRange = (lineNo: number | undefined) =>
     rangePreview != null && lineNo != null && lineNo >= rangePreview[0] && lineNo <= rangePreview[1]
 
-  if (view === "split") {
-    return (
-      <div className="font-mono text-xs overflow-x-auto" onMouseLeave={() => setHover(null)}>
-        {hunks.map((hunk, hi) => (
-          <div key={hi}>
-            <div className={`${hunkBg} px-2 py-1 sticky top-0 z-10`}>{hunk.header}</div>
+  return (
+    <div className="font-mono text-xs" onMouseLeave={() => setHover(null)}>
+      {hunks.map((hunk, hi) => (
+        <table key={hi} className="min-w-full border-collapse">
+          <thead>
+            <tr>
+              <td
+                colSpan={view === "split" ? 2 : 3}
+                className={`${hunkBg} px-2 py-1 sticky top-0 z-10`}
+              >
+                {hunk.header}
+              </td>
+            </tr>
+          </thead>
+          <tbody>
             {hunk.lines.map((line, li) => {
-              const key = `s-${hi}-${li}`
-              const copied = copiedKey === key
-              // The line number this row copies: new-file numbering for
-              // adds/context, old-file numbering for removes.
-              const rowNo = line.type === "remove" ? line.oldLineNo : line.newLineNo
-              const shown = line.type === "add" ? undefined : line.oldLineNo
-              const isAnchor = anchor === rowNo
+              const key = `${view === "split" ? "s" : "u"}-${hi}-${li}`
+              const lineNo = line.type === "remove" ? line.oldLineNo : line.newLineNo
+              const isAnchor = anchor === lineNo
+              const isRange = inRange(lineNo)
               const numCls = isAnchor
                 ? "bg-primary! text-primary-foreground!"
-                : inRange(rowNo)
+                : isRange
                   ? "bg-primary/15!"
                   : ""
-              const contentBg = line.type === "add" ? addBg : line.type === "remove" ? removeBg : ctxBg
+
+              if (view === "split") {
+                const copied = copiedKey === key
+                const shown = line.type === "add" ? undefined : line.oldLineNo
+                const contentBg = line.type === "add" ? addBg : line.type === "remove" ? removeBg : ctxText
+                return (
+                  <tr
+                    key={li}
+                    title={copyTitleFor(fullPath, anchor, lineNo ?? 0)}
+                    onClick={() => click(lineNo, key)}
+                    onMouseEnter={() => setHover(lineNo ?? null)}
+                    className="cursor-pointer"
+                  >
+                    <td className={`w-10 select-none border-r border-border bg-muted text-right text-xs text-muted-foreground pr-1 ${numCls}`}>
+                      {copied ? <Check size={12} className="inline-block align-middle" /> : isAnchor ? lineNo : shown ?? ""}
+                    </td>
+                    <td className={`whitespace-pre pl-1 ${contentBg}`}>{line.content}</td>
+                  </tr>
+                )
+              }
+
+              const copied = copiedKey === key
+              const bg = line.type === "add" ? addBg : line.type === "remove" ? removeBg : ""
+              const text = line.type === "add" ? "" : line.type === "remove" ? "" : ctxText
+              const prefix = line.type === "add" ? "+" : line.type === "remove" ? "-" : " "
               return (
-                <div
+                <tr
                   key={li}
-                  title={copyTitleFor(fullPath, anchor, rowNo ?? 0)}
-                  onClick={() => click(rowNo, key)}
-                  onMouseEnter={() => setHover(rowNo ?? null)}
-                  className="flex w-max min-w-full cursor-pointer"
+                  title={copyTitleFor(fullPath, anchor, lineNo ?? 0)}
+                  onClick={() => click(lineNo, key)}
+                  onMouseEnter={() => setHover(lineNo ?? null)}
+                  className={`cursor-pointer ${bg} ${text}`}
                 >
-                  <span className={`w-10 shrink-0 bg-muted text-muted-foreground text-right pr-1 select-none text-xs border-r border-border ${numCls}`}>
-                    {copied ? <Check size={12} className="inline-block align-middle" /> : isAnchor ? rowNo : shown ?? ""}
-                  </span>
-                  <span className={`flex-1 ${contentBg} pl-1 whitespace-pre`}>{line.content}</span>
-                </div>
+                  <td className={`w-12 select-none border-r border-border text-right pr-2 ${numCls || "text-muted-foreground"}`}>
+                    {copied ? <Check size={12} className="inline-block align-middle" /> : lineNo ?? ""}
+                  </td>
+                  <td className="w-5 select-none text-center">{prefix}</td>
+                  <td className="whitespace-pre pl-2">{line.content}</td>
+                </tr>
               )
             })}
-          </div>
-        ))}
-      </div>
-    )
-  }
-
-  return (
-    <div className="font-mono text-xs overflow-x-auto" onMouseLeave={() => setHover(null)}>
-      {hunks.map((hunk, hi) => (
-        <div key={hi}>
-          <div className={`${hunkBg} px-4 py-1 sticky top-0 z-10`}>{hunk.header}</div>
-          {hunk.lines.map((line, li) => {
-            const bg = line.type === "add" ? addBg : line.type === "remove" ? removeBg : ""
-            const text = line.type === "add" ? "" : line.type === "remove" ? "" : ctxBg
-            const prefix = line.type === "add" ? "+" : line.type === "remove" ? "-" : " "
-            const lineNo = line.type === "remove" ? line.oldLineNo : line.newLineNo
-            const key = `u-${hi}-${li}`
-            const isAnchor = anchor === lineNo
-            const numCls = isAnchor
-              ? "bg-primary! text-primary-foreground!"
-              : inRange(lineNo)
-                ? "bg-primary/15!"
-                : "text-muted-foreground"
-            return (
-              <div
-                key={li}
-                title={copyTitleFor(fullPath, anchor, lineNo ?? 0)}
-                onClick={() => click(lineNo, key)}
-                onMouseEnter={() => setHover(lineNo ?? null)}
-                className={`flex w-max min-w-full cursor-pointer ${bg} ${text}`}
-              >
-                <span className={`w-12 shrink-0 text-right pr-2 select-none border-r border-border ${numCls}`}>
-                  {copiedKey === key ? <Check size={12} className="inline-block align-middle" /> : lineNo ?? ""}
-                </span>
-                <span className="w-5 shrink-0 text-center select-none">{prefix}</span>
-                <span className="flex-1 pl-2 whitespace-pre">{line.content}</span>
-              </div>
-            )
-          })}
-        </div>
+          </tbody>
+        </table>
       ))}
     </div>
   )
@@ -583,27 +651,32 @@ export default function GitReviewPage() {
   const [loading, setLoading] = useState(false)
   const [files, setFiles] = useState<GitFile[]>([])
   const [branch, setBranch] = useState("")
-  const [selectedFile, setSelectedFile] = useState<string | null>(null)
-  const [selectedStaged, setSelectedStaged] = useState(false)
-  const [fileDiff, setFileDiff] = useState("")
-  const [diffLoading, setDiffLoading] = useState(false)
-  const [viewMode, setViewMode] = useState<"unified" | "split" | "raw">("split")
+  // --- Open-files buffer -------------------------------------------------
+  // All state that used to describe a single selected file now lives inside a
+  // BufferEntry. The list of entries is the buffer; activeId picks the one
+  // the diff card renders. Mutations always go through `updateEntry` /
+  // `setBuffer` so React stays the source of truth.
+  const [buffer, setBuffer] = useState<BufferEntry[]>([])
+  const [activeId, setActiveId] = useState<string | null>(null)
+  // Tracks the currently mounted repo key so we can persist buffer changes
+  // back to the right localStorage slot without re-running on each setState.
+  const persistedRepoRef = useRef<string>("")
+  // Used by the repo selector / mount-time URL parse to coordinate the
+  // initial persistence restore (similar to sidebarMountedRef).
+  const bufferMountedRef = useRef(false)
+  // Tracks ids whose diff fetch is currently in flight. This is a *synchronous*
+  // mirror of BufferEntry.diffLoading — React state updates batched inside a
+  // single event tick can't be observed by sibling clicks, so rapid clicks on
+  // the same file would all see diffLoading=false and queue duplicate fetches.
+  // We mirror the flag here so the second click in the same tick is a no-op.
+  const inFlightRef = useRef<Set<string>>(new Set())
   const [error, setError] = useState("")
-  const [mdRender, setMdRender] = useState(false)
-  const [mdContent, setMdContent] = useState("")
-  const [rawContent, setRawContent] = useState("")
-  const [rawFile, setRawFile] = useState("")
-  const [rawError, setRawError] = useState("")
   const [allFiles, setAllFiles] = useState<{ path: string; status: string; type?: string }[]>([])
-  const [selectedFromAll, setSelectedFromAll] = useState(false)
   const [commitMsg, setCommitMsg] = useState("")
   const [busyAction, setBusyAction] = useState<string | null>(null)
   const [actionResult, setActionResult] = useState<{ ok: boolean; message: string } | null>(null)
   const diffCardRef = useRef<HTMLDivElement>(null)
   const [isFullscreen, setIsFullscreen] = useState(false)
-  const [editMode, setEditMode] = useState(false)
-  const [editContent, setEditContent] = useState("")
-  const prevViewModeRef = useRef<"unified" | "split" | "raw" | null>(null)
   const [isSaving, setIsSaving] = useState(false)
   const saveFileRef = useRef<() => Promise<void>>(async () => {})
   // Dialog states
@@ -611,6 +684,7 @@ export default function GitReviewPage() {
   const [createFileName, setCreateFileName] = useState("")
   const [deleteFileOpen, setDeleteFileOpen] = useState(false)
   const [fileToDelete, setFileToDelete] = useState<string | null>(null)
+  const [fileSearch, setFileSearch] = useState("")
 
   // --- Sidebar (VS Code-style) state --------------------------------------
   const [sidebarOpen, setSidebarOpen] = useState(true)
@@ -678,24 +752,6 @@ export default function GitReviewPage() {
     setSidebarOpen(open => !open)
   }, [])
 
-  // Ctrl/Cmd+B toggles the sidebar (VS Code muscle memory).
-  useEffect(() => {
-    const onKey = (e: KeyboardEvent) => {
-      if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "b") {
-        e.preventDefault()
-        toggleSidebar()
-      }
-      if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "s") {
-        if (editMode) {
-          e.preventDefault()
-          saveFileRef.current()
-        }
-      }
-    }
-    window.addEventListener("keydown", onKey)
-    return () => window.removeEventListener("keydown", onKey)
-  }, [toggleSidebar, editMode])
-
   // Drag the sidebar's right edge to resize (clamped 200–400px, persisted
   // on release). Double-clicking the handle resets to the default width.
   const widthRef = useRef(SIDEBAR_DEFAULT_WIDTH)
@@ -761,26 +817,202 @@ export default function GitReviewPage() {
     }
   }, [repoPath, loadAllFiles])
 
-  const loadRaw = useCallback(async (file: string): Promise<string> => {
-    setRawFile(file)
-    setRawError("")
+  // --- Buffer helpers ---------------------------------------------------
+  // Updates the entry that matches `id` (or every entry when id === "*").
+  // Returns a new array so React detects the change — never mutate entries
+  // in place.
+  const updateEntry = useCallback(
+    (id: string, patch: Partial<BufferEntry>) => {
+      setBuffer(prev =>
+        prev.map(b => (b.id === id ? { ...b, ...patch } : b))
+      )
+    },
+    []
+  )
+
+  // Find or create the tab for (file, staged, fromAll) and return its id.
+  // The repo path is captured in the id so a stale id from a different repo
+  // never resolves to a live entry. Rapid clicks resolve to a single entry:
+  // the setBuffer callback dedupes by id so we never get duplicate tabs even
+  // if multiple synchronous clicks race against a pending React update.
+  const ensureTab = useCallback(
+    (file: string, staged: boolean, fromAll: boolean, oldPath?: string): string => {
+      const id = makeTabId(repoPath, file, staged, fromAll)
+      const created: BufferEntry = {
+        id,
+        file,
+        staged,
+        fromAll,
+        diff: "",
+        diffLoading: false,
+        raw: "",
+        rawError: "",
+        md: "",
+        mdRender: false,
+        viewMode: "split",
+        editMode: false,
+        editContent: "",
+        dirty: false,
+        oldPath,
+      }
+      setBuffer(prev => {
+        if (prev.some(b => b.id === id)) return prev
+        const next = [...prev, created]
+        // Soft cap: evict the oldest non-active, non-dirty tab when full.
+        // If everything is dirty we still drop the oldest to keep the strip
+        // usable — the user's edits are preserved on disk for the active
+        // tab; the rest still live in their entries and can be re-opened
+        // via the sidebar.
+        if (next.length <= TAB_CAP) return next
+        const evictIdx = next.findIndex(b => !b.dirty)
+        const dropAt = evictIdx === -1 ? 0 : evictIdx
+        return [...next.slice(0, dropAt), ...next.slice(dropAt + 1)]
+      })
+      return id
+    },
+    [repoPath]
+  )
+
+  const active = useMemo(
+    () => (activeId ? buffer.find(b => b.id === activeId) ?? null : null),
+    [buffer, activeId]
+  )
+
+  // --- Loaders that target the buffer ----------------------------------
+
+  // Reads the file's raw content into the given entry. Returns the content
+  // so callers (toggleEditMode) can keep their synchronous lookups.
+  const fetchRaw = useCallback(async (entry: BufferEntry): Promise<string> => {
     try {
-      const res = await fetch(`/api/git/content?repo=${encodeURIComponent(repoPath)}&file=${encodeURIComponent(file)}`)
+      const res = await fetch(`/api/git/content?repo=${encodeURIComponent(repoPath)}&file=${encodeURIComponent(entry.file)}`)
       const data = await res.json()
       if (data.error) {
-        setRawError(data.error)
-        setRawContent("")
+        updateEntry(entry.id, { rawError: data.error, raw: "" })
         return ""
-      } else {
-        setRawContent(data.content ?? "")
-        return data.content ?? ""
       }
+      updateEntry(entry.id, { rawError: "", raw: data.content ?? "" })
+      return data.content ?? ""
     } catch (e) {
-      setRawError(e instanceof Error ? e.message : "Failed to read file")
-      setRawContent("")
+      updateEntry(entry.id, {
+        rawError: e instanceof Error ? e.message : "Failed to read file",
+        raw: "",
+      })
       return ""
     }
-  }, [repoPath])
+  }, [repoPath, updateEntry])
+
+  // Fetches both diff and (when needed) raw content for the entry, writing
+  // into the entry's slots. fromAll entries (files opened from the All Files
+  // tree that have no diff) always pull raw content; entries with a diff
+  // only pull raw when the user has switched to raw view mode.
+  const fetchEntry = useCallback(async (entry: BufferEntry) => {
+    inFlightRef.current.add(entry.id)
+    updateEntry(entry.id, { diffLoading: true })
+    try {
+      if (!entry.fromAll) {
+        const oldPathQS = entry.oldPath
+          ? `&oldPath=${encodeURIComponent(entry.oldPath)}`
+          : ""
+        const res = await fetch(
+          `/api/git/diff?repo=${encodeURIComponent(repoPath)}&file=${encodeURIComponent(entry.file)}&staged=${entry.staged ? 1 : 0}${oldPathQS}`
+        )
+        const data = await res.json()
+        updateEntry(entry.id, { diff: data.diff || "" })
+      } else {
+        updateEntry(entry.id, { diff: "" })
+      }
+      if (entry.fromAll || entry.viewMode === "raw") {
+        await fetchRaw(entry)
+      }
+    } catch {
+      updateEntry(entry.id, { diff: "" })
+    } finally {
+      inFlightRef.current.delete(entry.id)
+      updateEntry(entry.id, { diffLoading: false })
+    }
+  }, [repoPath, fetchRaw, updateEntry])
+
+  // Sidebar click — the unified open/activate handler. Either creates a
+  // new tab or activates the existing one; either way the entry's content
+  // is re-fetched so the user always sees the file's current state.
+  const openOrActivateTab = useCallback(
+    (file: string, staged: boolean, fromAll: boolean, oldPath?: string) => {
+      const id = makeTabId(repoPath, file, staged, fromAll)
+      const existing = buffer.find(b => b.id === id)
+      // In-flight guard: if a refetch is already running for this entry the
+      // click is a no-op so we never queue duplicate fetches. We check both
+      // the synchronous ref and the buffered flag — the ref covers rapid
+      // clicks within one event tick, the buffered flag covers clicks
+      // separated by a render.
+      if (inFlightRef.current.has(id)) {
+        setActiveId(id)
+        return
+      }
+      if (existing?.diffLoading) {
+        setActiveId(id)
+        return
+      }
+      // If we have an existing entry in this render's buffer, use it for the
+      // fetch. Otherwise build a transient entry shape to pass to fetchEntry;
+      // ensureTab's setBuffer callback dedupes any race with another sync
+      // click so we never end up with duplicate ids.
+      const target: BufferEntry = existing ?? {
+        id,
+        file,
+        staged,
+        fromAll,
+        diff: "",
+        diffLoading: false,
+        raw: "",
+        rawError: "",
+        md: "",
+        mdRender: false,
+        viewMode: "split",
+        editMode: false,
+        editContent: "",
+        dirty: false,
+        oldPath,
+      }
+      ensureTab(file, staged, fromAll, oldPath)
+      setActiveId(id)
+      void fetchEntry(target)
+    },
+    [buffer, repoPath, ensureTab, fetchEntry]
+  )
+
+  const closeTab = useCallback((id: string) => {
+    // Compute the next active id from the current buffer synchronously, then
+    // commit both updates. Using the stale closure's buffer is fine here
+    // because the operation is idempotent and the next click will re-resolve.
+    const removedIdx = buffer.findIndex(b => b.id === id)
+    let nextActive: string | null = activeId
+    if (removedIdx !== -1 && activeId === id) {
+      const remaining = buffer.filter(b => b.id !== id)
+      nextActive = remaining.length === 0
+        ? null
+        : remaining[Math.min(removedIdx, remaining.length - 1)].id
+    } else if (activeId === id) {
+      nextActive = null
+    }
+    setBuffer(prev => prev.filter(b => b.id !== id))
+    setActiveId(nextActive)
+  }, [buffer, activeId])
+
+  // Refreshes the content of an entry without changing which tab is active.
+  // Used by the tab's refresh button; clicking the tab itself also calls this.
+  const refreshTab = useCallback((entry: BufferEntry) => {
+    if (inFlightRef.current.has(entry.id) || entry.diffLoading) return
+    setActiveId(entry.id)
+    void fetchEntry(entry)
+  }, [fetchEntry])
+
+  // Persist the buffer back to localStorage whenever it changes — but only
+  // after the initial mount/restore has happened so we don't clobber the
+  // stored list with the empty seed.
+  useEffect(() => {
+    if (!bufferMountedRef.current) return
+    writePersistedBuffer(persistedRepoRef.current, buffer, activeId)
+  }, [buffer, activeId])
 
   // --- All Files tree + selection helpers --------------------------------
 
@@ -818,66 +1050,29 @@ export default function GitReviewPage() {
   // diff so the view is consistent with the Changes/Staged sections.
   const selectFromTree = useCallback(
     (filePath: string) => {
-      setSelectedFile(filePath)
-      setMdRender(false)
-      setMdContent("")
-      setRawContent("")
-      setRawFile("")
-      setRawError("")
-      setEditMode(false)
-      setEditContent("")
-      // Check if this file has uncommitted changes (modified/staged/deleted/renamed)
-      const changedFile = files.find(f => f.path === filePath)
-      if (changedFile) {
-        // File has changes — show diff instead of raw content
-        setSelectedStaged(changedFile.staged)
-        setSelectedFromAll(false)
-        setFileDiff("")
-        setDiffLoading(true)
-        if (viewMode === "raw") loadRaw(filePath)
-        fetch(`/api/git/diff?repo=${encodeURIComponent(repoPath)}&file=${encodeURIComponent(filePath)}&staged=${changedFile.staged ? 1 : 0}`)
-          .then(res => res.json())
-          .then(data => setFileDiff(data.diff || ""))
-          .catch(() => setFileDiff(""))
-          .finally(() => setDiffLoading(false))
+      const matched = files.find(f => f.path === filePath)
+      expandAncestors(filePath)
+      if (matched) {
+        // File has uncommitted changes — show diff so the view matches the
+        // Changes/Staged sections.
+        openOrActivateTab(filePath, matched.staged, false, matched.oldPath)
       } else {
-        // No changes — show raw content (untracked/new file)
-        setSelectedStaged(false)
-        setSelectedFromAll(true)
-        setFileDiff("")
-        setDiffLoading(false)
-        loadRaw(filePath)
+        openOrActivateTab(filePath, false, true)
       }
     },
-    [files, repoPath, viewMode, loadRaw]
+    [files, openOrActivateTab, expandAncestors]
   )
 
-  const loadDiff = useCallback(async (file: string, staged: boolean) => {
-    setSelectedFile(file)
-    setSelectedStaged(staged)
-    setSelectedFromAll(false)
-    expandAncestors(file)
-    setMdRender(false)
-    setMdContent("")
-    setRawContent("")
-    setRawFile("")
-    setRawError("")
-    setEditMode(false)
-    setEditContent("")
-    setDiffLoading(true)
-    // If we're already in raw mode, fetch the new file's content right away
-    // instead of leaving a spinner until the Raw button is clicked again.
-    if (viewMode === "raw") loadRaw(file)
-    try {
-      const res = await fetch(`/api/git/diff?repo=${encodeURIComponent(repoPath)}&file=${encodeURIComponent(file)}&staged=${staged ? 1 : 0}`)
-      const data = await res.json()
-      setFileDiff(data.diff || "")
-    } catch {
-      setFileDiff("")
-    } finally {
-      setDiffLoading(false)
-    }
-  }, [repoPath, viewMode, loadRaw, expandAncestors])
+  // Triggered from the Changes/Staged tree rows. Equivalent to opening a
+  // new tab for (file, staged, false).
+  const loadDiff = useCallback(
+    (file: string, staged: boolean) => {
+      expandAncestors(file)
+      const matched = files.find(f => f.path === file && f.staged === staged)
+      openOrActivateTab(file, staged, false, matched?.oldPath)
+    },
+    [files, openOrActivateTab, expandAncestors]
+  )
 
   const runAction = useCallback(async (
     action: "add" | "addAll" | "unstage" | "unstageAll" | "commit" | "push" | "create" | "delete",
@@ -899,18 +1094,14 @@ export default function GitReviewPage() {
         if (action === "commit") setCommitMsg("")
         const fresh = await loadStatus()
         // Staging/unstaging the selected file can flip which side of it we are
-        // looking at — sync the diff header's stage/unstage button and reload
-        // the matching diff so the view never goes stale.
-        if (
-          fresh &&
-          selectedFile &&
-          (action === "addAll" || action === "unstageAll" || payload?.files?.includes(selectedFile))
-        ) {
-          const nowStaged = fresh.some(f => f.path === selectedFile && f.staged)
-          setSelectedStaged(nowStaged)
-          const diffRes = await fetch(`/api/git/diff?repo=${encodeURIComponent(repoPath)}&file=${encodeURIComponent(selectedFile)}&staged=${nowStaged ? 1 : 0}`)
-          const diffData = await diffRes.json()
-          setFileDiff(diffData.diff || "")
+        // looking at — keep the active tab focused and update its staged flag
+        // in place rather than spawning a second tab. The user can still
+        // open the other staged/unstaged variant manually from the sidebar.
+        if (fresh && active && (action === "addAll" || action === "unstageAll" || payload?.files?.includes(active.file))) {
+          const nowStaged = fresh.some(f => f.path === active.file && f.staged)
+          const matched = fresh.find(f => f.path === active.file && f.staged === nowStaged)
+          updateEntry(active.id, { staged: nowStaged, oldPath: matched?.oldPath })
+          void fetchEntry({ ...active, staged: nowStaged, oldPath: matched?.oldPath })
         }
         // Refresh all-files list after create/delete
         if (action === "create" || action === "delete") {
@@ -925,17 +1116,17 @@ export default function GitReviewPage() {
     } finally {
       setBusyAction(null)
     }
-  }, [repoPath, loadStatus, selectedFile])
+  }, [repoPath, loadStatus, active, updateEntry, loadAllFiles, selectFromTree, fetchEntry])
 
-  const loadMarkdown = useCallback(async (file: string) => {
+  const loadMarkdown = useCallback(async (entry: BufferEntry) => {
     try {
-      const res = await fetch(`/api/git/content?repo=${encodeURIComponent(repoPath)}&file=${encodeURIComponent(file)}`)
+      const res = await fetch(`/api/git/content?repo=${encodeURIComponent(repoPath)}&file=${encodeURIComponent(entry.file)}`)
       const data = await res.json()
-      setMdContent(data.content ?? "")
+      updateEntry(entry.id, { md: data.content ?? "" })
     } catch {
-      setMdContent("")
+      updateEntry(entry.id, { md: "" })
     }
-  }, [repoPath])
+  }, [repoPath, updateEntry])
 
   const canEdit = useCallback((file: string | null) => {
     if (!file) return false
@@ -946,61 +1137,53 @@ export default function GitReviewPage() {
   }, [files])
 
   const toggleEditMode = useCallback(async () => {
-    if (!editMode) {
-      if (!selectedFile || !canEdit(selectedFile)) return
-      let content = rawContent
-      if (rawFile !== selectedFile) {
-        content = await loadRaw(selectedFile)
+    if (!active) return
+    if (!active.editMode) {
+      if (!canEdit(active.file)) return
+      let content = active.raw
+      if (!content || active.rawError) {
+        content = await fetchRaw(active)
       }
-      prevViewModeRef.current = viewMode
-      setMdRender(false)
-      setEditContent(content)
-      setEditMode(true)
+      updateEntry(active.id, {
+        viewMode: "split", // any future value works; raw is irrelevant while editing
+        editMode: true,
+        editContent: content,
+        dirty: false,
+        mdRender: false,
+      })
     } else {
-      setEditMode(false)
-      setEditContent("")
-      const prev = prevViewModeRef.current
-      if (prev) {
-        setViewMode(prev)
-        prevViewModeRef.current = null
-      } else {
-        setViewMode("raw")
-      }
+      updateEntry(active.id, { editMode: false, editContent: "", dirty: false })
     }
-  }, [editMode, selectedFile, canEdit, viewMode, rawContent, rawFile, loadRaw])
+  }, [active, canEdit, fetchRaw, updateEntry])
 
   const saveFile = useCallback(async () => {
-    if (!selectedFile || editContent === rawContent) return
+    if (!active || active.editContent === active.raw) return
     setIsSaving(true)
     setActionResult(null)
     try {
-      const res = await fetch(`/api/git/content?repo=${encodeURIComponent(repoPath)}&file=${encodeURIComponent(selectedFile)}`, {
+      const res = await fetch(`/api/git/content?repo=${encodeURIComponent(repoPath)}&file=${encodeURIComponent(active.file)}`, {
         method: "PUT",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ content: editContent }),
+        body: JSON.stringify({ content: active.editContent }),
       })
       const data = await res.json()
       if (data.error) {
         setActionResult({ ok: false, message: data.error })
       } else {
         setActionResult({ ok: true, message: "File saved" })
-        setEditMode(false)
-        setEditContent("")
-        setRawContent(editContent)
-        const prev = prevViewModeRef.current
-        if (prev) {
-          setViewMode(prev)
-          prevViewModeRef.current = null
-        }
+        updateEntry(active.id, { editMode: false, editContent: "", dirty: false, raw: active.editContent })
         await loadStatus()
-        await loadRaw(selectedFile)
+        // Re-fetch the entry so any diff on the active tab reflects the saved
+        // state and stale cached entries on other tabs also refresh.
+        const refreshed = buffer.find(b => b.id === active.id)
+        if (refreshed) await fetchEntry(refreshed)
       }
     } catch (e) {
       setActionResult({ ok: false, message: e instanceof Error ? e.message : "Failed to save file" })
     } finally {
       setIsSaving(false)
     }
-  }, [selectedFile, editContent, rawContent, repoPath, loadStatus, loadRaw])
+  }, [active, repoPath, loadStatus, buffer, fetchEntry, updateEntry])
 
   useEffect(() => {
     saveFileRef.current = saveFile
@@ -1016,18 +1199,13 @@ export default function GitReviewPage() {
   const handleDeleteFile = useCallback(async () => {
     if (!fileToDelete) return
     setDeleteFileOpen(false)
-    const wasSelected = selectedFile === fileToDelete
+    const wasActive = active?.file === fileToDelete
     await runAction("delete", { files: [fileToDelete] })
-    if (wasSelected) {
-      setSelectedFile(null)
-      setFileDiff("")
-      setRawContent("")
-      setRawFile("")
-      setEditMode(false)
-      setEditContent("")
+    if (wasActive) {
+      closeTab(active!.id)
     }
     setFileToDelete(null)
-  }, [fileToDelete, selectedFile, runAction])
+  }, [fileToDelete, active, runAction, closeTab])
 
   const openDeleteDialog = useCallback((filePath: string) => {
     setFileToDelete(filePath)
@@ -1038,8 +1216,125 @@ export default function GitReviewPage() {
   useEffect(() => {
     if (didInitialLoadRef.current) return
     didInitialLoadRef.current = true
-    loadStatus()
-  }, [loadStatus])
+    // Apply ?project=<name> from the URL if it matches a known project. The
+    // match is case-sensitive and exact (per the plan). Unknown values are
+    // silently ignored — the URL is left as the user typed it for debugging.
+    try {
+      const params = new URLSearchParams(window.location.search)
+      const name = params.get("project")
+      if (name) {
+        const match = projects.projects.find(p => p.name === name)
+        if (match && match.dir !== repoPath) {
+          // Snapshot the outgoing repo's buffer so coming back later restores
+          // the user's tabs. The buffer-mount guard hasn't fired yet so the
+          // persistence effect won't have written anything — persist now.
+          writePersistedBuffer(repoPath, buffer, activeId)
+          // eslint-disable-next-line react-hooks/set-state-in-effect -- one-shot URL → state hydration on mount; the didInitialLoadRef guard makes this never run again
+          setRepoPath(match.dir)
+          persistedRepoRef.current = match.dir
+        } else {
+          persistedRepoRef.current = repoPath
+        }
+      } else {
+        persistedRepoRef.current = repoPath
+      }
+    } catch {
+      persistedRepoRef.current = repoPath
+    }
+    // Restore any previously open tabs for the now-active repo. Runs once
+    // after the URL parse so the buffer is consistent with the URL.
+    const restoreRepo = persistedRepoRef.current
+    const restored = readPersistedBuffer(restoreRepo)
+    if (restored && restored.tabs.length > 0) {
+      const seeded: BufferEntry[] = restored.tabs.map(t => ({
+        id: makeTabId(restoreRepo, t.file, t.staged, t.fromAll),
+        file: t.file,
+        staged: t.staged,
+        fromAll: t.fromAll,
+        diff: "",
+        diffLoading: false,
+        raw: "",
+        rawError: "",
+        md: "",
+        mdRender: false,
+        viewMode: "split",
+        editMode: false,
+        editContent: "",
+        dirty: false,
+      }))
+      setBuffer(seeded)
+      const validActive = restored.activeId && seeded.some(b => b.id === restored.activeId)
+        ? restored.activeId
+        : seeded[0]?.id ?? null
+      setActiveId(validActive)
+    }
+    bufferMountedRef.current = true
+    loadStatus(persistedRepoRef.current)
+  }, [loadStatus, repoPath, buffer, activeId])
+
+  // After loadStatus finishes (files populated), kick off the active tab's
+  // content fetch. Files are needed so oldPath can be resolved for renames;
+  // without waiting we may render the diff without the rename hint.
+  const activeRefetchedRef = useRef(false)
+  useEffect(() => {
+    if (activeRefetchedRef.current) return
+    if (!active || active.diffLoading) return
+    if (loading) return
+    activeRefetchedRef.current = true
+    // eslint-disable-next-line react-hooks/set-state-in-effect -- fetchEntry is the same effect-trigger we just guarded against re-running; we only call it once per active entry
+    void fetchEntry(active)
+  }, [active, loading, fetchEntry])
+
+  // Reset the active-refetch guard on repo switch so the new active tab
+  // gets its initial fetch when files arrive, and on every activeId change
+  // so switching tabs via the sidebar always re-fetches the new active.
+  useEffect(() => {
+    activeRefetchedRef.current = false
+  }, [repoPath, activeId])
+
+  // Ctrl/Cmd+B toggles the sidebar (VS Code muscle memory).
+  // Ctrl/Cmd+W closes the active tab; Ctrl/Cmd+Tab / PageUp/PageDown cycle
+  // tabs. Ctrl/Cmd+S saves when the active tab is in edit mode.
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      const mod = e.ctrlKey || e.metaKey
+      if (!mod) return
+      const key = e.key.toLowerCase()
+      if (key === "b") {
+        e.preventDefault()
+        toggleSidebar()
+        return
+      }
+      if (key === "s") {
+        if (active?.editMode) {
+          e.preventDefault()
+          saveFileRef.current()
+        }
+        return
+      }
+      if (key === "w" && active) {
+        e.preventDefault()
+        if (active.dirty && !window.confirm("Discard unsaved changes?")) return
+        closeTab(active.id)
+        return
+      }
+      if (key === "tab" || e.key === "PageDown" || e.key === "PageUp") {
+        if (buffer.length < 2) return
+        e.preventDefault()
+        const idx = buffer.findIndex(b => b.id === activeId)
+        const dir = key === "tab" ? (e.shiftKey ? -1 : 1) : e.key === "PageDown" ? 1 : -1
+        const next = (idx + dir + buffer.length) % buffer.length
+        const target = buffer[next]
+        if (target) {
+          // Keyboard tab cycling is instant — same as clicking the tab.
+          // Use the per-tab refresh button if you want fresh content.
+          setActiveId(target.id)
+        }
+      }
+    }
+    window.addEventListener("keydown", onKey)
+    return () => window.removeEventListener("keydown", onKey)
+  }, [toggleSidebar, active, buffer, activeId, closeTab, fetchEntry])
 
   const changesFiles = files.filter(f => !f.staged)
   const stagedFiles = files.filter(f => f.staged)
@@ -1047,8 +1342,12 @@ export default function GitReviewPage() {
   const fileTree = useMemo(() => buildTree(allFiles), [allFiles])
   const changesTree = useMemo(() => buildTree(changesFiles.map(f => ({ path: f.path, status: f.status }))), [changesFiles])
   const stagedTree = useMemo(() => buildTree(stagedFiles.map(f => ({ path: f.path, status: f.status }))), [stagedFiles])
+  const filteredFileTree = useMemo(() => filterTreeNodes(fileTree, fileSearch), [fileTree, fileSearch])
+  const filteredChangesTree = useMemo(() => filterTreeNodes(changesTree, fileSearch), [changesTree, fileSearch])
+  const filteredStagedTree = useMemo(() => filterTreeNodes(stagedTree, fileSearch), [stagedTree, fileSearch])
+  const hasFileSearch = fileSearch.trim().length > 0
 
-  const selectedFullPath = selectedFile ? (repoPath ? `${repoPath}/${selectedFile}` : selectedFile) : ""
+  const selectedFullPath = active ? (repoPath ? `${repoPath}/${active.file}` : active.file) : ""
 
   const handleRowKeyDown = (
     e: React.KeyboardEvent<HTMLDivElement>,
@@ -1091,8 +1390,8 @@ export default function GitReviewPage() {
     <>
       {nodes.map((node) => {
         const isDir = node.type === "dir"
-        const expanded = isDir && expandedDirs.has(node.path)
-        const active = !isDir && selectedFile === node.path
+        const expanded = isDir && (hasFileSearch || expandedDirs.has(node.path))
+        const isActive = !isDir && active?.file === node.path
         const activate = () => {
           if (isDir) {
             toggleDir(node.path)
@@ -1115,7 +1414,7 @@ export default function GitReviewPage() {
                 })
               }
               style={{ paddingLeft: 8 + depth * 12 }}
-              className={`group flex items-center gap-1 rounded-md py-1.5 pr-1 text-xs outline-none transition-colors cursor-pointer focus-visible:ring-2 focus-visible:ring-ring ${active ? "bg-primary text-primary-foreground" : "text-foreground hover:bg-accent hover:text-accent-foreground"}`}
+              className={`group flex items-center gap-1 rounded-md py-1.5 pr-1 text-xs outline-none transition-colors cursor-pointer focus-visible:ring-2 focus-visible:ring-ring ${isActive ? "bg-primary text-primary-foreground" : "text-foreground hover:bg-accent hover:text-accent-foreground"}`}
             >
               <Tooltip>
                 <TooltipTrigger asChild>
@@ -1128,13 +1427,13 @@ export default function GitReviewPage() {
                     ) : (
                       <span className="w-3.5 shrink-0" />
                     )}
-                    <span className={`shrink-0 ${active ? "text-primary-foreground" : "text-muted-foreground"}`}>
+                    <span className={`shrink-0 ${isActive ? "text-primary-foreground" : "text-muted-foreground"}`}>
                       {isDir ? <Folder size={14} /> : node.status === "untracked" ? <Plus size={14} /> : <File size={14} />}
                     </span>
                     <span className={`flex-1 truncate ${isDir ? "font-medium" : ""}`}>{node.name}</span>
                     {node.status === "untracked" && (
                       <span
-                        className={`shrink-0 rounded border px-1.5 py-0 text-[10px] ${active ? "bg-primary-foreground/20 text-primary-foreground border-primary-foreground/30" : "bg-muted text-muted-foreground border-border"}`}
+                        className={`shrink-0 rounded border px-1.5 py-0 text-[10px] ${isActive ? "bg-primary-foreground/20 text-primary-foreground border-primary-foreground/30" : "bg-muted text-muted-foreground border-border"}`}
                       >
                         {statusLabel("untracked")}
                       </span>
@@ -1177,8 +1476,8 @@ export default function GitReviewPage() {
     <>
       {nodes.map((node) => {
         const isDir = node.type === "dir"
-        const expanded = isDir && expandedDirs.has(node.path)
-        const active = !isDir && selectedFile === node.path
+        const expanded = isDir && (hasFileSearch || expandedDirs.has(node.path))
+        const isActive = !isDir && active?.file === node.path
         const activate = () => {
           if (isDir) {
             toggleDir(node.path)
@@ -1204,7 +1503,7 @@ export default function GitReviewPage() {
                 })
               }
               style={{ paddingLeft: 8 + depth * 12 }}
-              className={`group flex items-center gap-1 rounded-md py-1.5 pr-1 text-xs outline-none transition-colors cursor-pointer focus-visible:ring-2 focus-visible:ring-ring ${active ? "bg-primary text-primary-foreground" : "text-foreground hover:bg-accent hover:text-accent-foreground"}`}
+              className={`group flex items-center gap-1 rounded-md py-1.5 pr-1 text-xs outline-none transition-colors cursor-pointer focus-visible:ring-2 focus-visible:ring-ring ${isActive ? "bg-primary text-primary-foreground" : "text-foreground hover:bg-accent hover:text-accent-foreground"}`}
             >
               <Tooltip>
                 <TooltipTrigger asChild>
@@ -1217,13 +1516,13 @@ export default function GitReviewPage() {
                     ) : (
                       <span className="w-3.5 shrink-0" />
                     )}
-                    <span className={`shrink-0 ${active ? "text-primary-foreground" : "text-muted-foreground"}`}>
+                    <span className={`shrink-0 ${isActive ? "text-primary-foreground" : "text-muted-foreground"}`}>
                       {isDir ? <Folder size={14} /> : statusIcon(node.status)}
                     </span>
                     <span className={`flex-1 truncate ${isDir ? "font-medium" : ""}`}>{node.name}</span>
                     {!isDir && node.status !== "untracked" && (
                       <span
-                        className={`shrink-0 rounded border px-1.5 py-0 text-[10px] ${active ? "bg-primary-foreground/20 text-primary-foreground border-primary-foreground/30" : statusBadgeColor(node.status)}`}
+                        className={`shrink-0 rounded border px-1.5 py-0 text-[10px] ${isActive ? "bg-primary-foreground/20 text-primary-foreground border-primary-foreground/30" : statusBadgeColor(node.status)}`}
                       >
                         {statusLabel(node.status)}
                       </span>
@@ -1259,6 +1558,18 @@ export default function GitReviewPage() {
 
   const sidebarContent = (onNavigate: () => void) => (
     <Tabs defaultValue="changes" className="flex flex-col">
+      <div className="px-2 pt-2">
+        <div className="relative">
+          <Search size={14} className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-muted-foreground" />
+          <input
+            type="search"
+            placeholder="Search files…"
+            value={fileSearch}
+            onChange={e => setFileSearch(e.target.value)}
+            className="h-8 w-full rounded-md border border-input bg-background pl-9 pr-3 text-sm text-foreground placeholder:text-muted-foreground focus:outline-none focus:ring-2 focus:ring-ring"
+          />
+        </div>
+      </div>
       <TabsList className="mx-2 mt-2 grid grid-cols-3">
         <TabsTrigger value="changes" className="text-xs">
           Changes <span className="ml-1 rounded border border-border bg-muted px-1.5 py-0 text-[10px] tabular-nums text-muted-foreground">{changesFiles.length}</span>
@@ -1276,8 +1587,10 @@ export default function GitReviewPage() {
             renderSkeletonRows()
           ) : changesFiles.length === 0 ? (
             <p className="px-2 py-2 text-[11px] text-muted-foreground">No changes</p>
+          ) : filteredChangesTree.length === 0 ? (
+            <p className="px-2 py-2 text-[11px] text-muted-foreground">No matches</p>
           ) : (
-            <div className="pb-1">{renderGitTreeNodes(changesTree, 0, onNavigate, false)}</div>
+            <div className="pb-1">{renderGitTreeNodes(filteredChangesTree, 0, onNavigate, false)}</div>
           )}
         </TabsContent>
         <TabsContent value="staged" className="mt-0 px-2">
@@ -1285,15 +1598,19 @@ export default function GitReviewPage() {
             renderSkeletonRows(3)
           ) : stagedFiles.length === 0 ? (
             <p className="px-2 py-2 text-[11px] text-muted-foreground">Nothing staged</p>
+          ) : filteredStagedTree.length === 0 ? (
+            <p className="px-2 py-2 text-[11px] text-muted-foreground">No matches</p>
           ) : (
-            <div className="pb-1">{renderGitTreeNodes(stagedTree, 0, onNavigate, true)}</div>
+            <div className="pb-1">{renderGitTreeNodes(filteredStagedTree, 0, onNavigate, true)}</div>
           )}
         </TabsContent>
         <TabsContent value="all" className="mt-0 px-2">
           {allFiles.length === 0 ? (
             renderSkeletonRows(6)
+          ) : filteredFileTree.length === 0 ? (
+            <p className="px-2 py-2 text-[11px] text-muted-foreground">No matches</p>
           ) : (
-            <div className="pb-1">{renderTreeNodes(fileTree, 0, onNavigate)}</div>
+            <div className="pb-1">{renderTreeNodes(filteredFileTree, 0, onNavigate)}</div>
           )}
         </TabsContent>
       </div>
@@ -1365,13 +1682,62 @@ export default function GitReviewPage() {
               <select
                 value={repoPath}
                 onChange={e => {
-                  setRepoPath(e.target.value)
-                  setSelectedFile(null)
-                  setSelectedFromAll(false)
+                  const nextRepo = e.target.value
+                  if (nextRepo === repoPath) return
+                  // If the buffer has dirty tabs, confirm before discarding.
+                  const hasDirty = buffer.some(b => b.dirty)
+                  if (hasDirty && !window.confirm("Discard unsaved changes in open tabs?")) {
+                    // Restore the select's visual value by re-rendering — the
+                    // browser already painted the new value, but we'll keep
+                    // repoPath at the old one and bail.
+                    return
+                  }
+                  // Persist the *outgoing* repo's tabs first so the next
+                  // visit to that repo restores the same list.
+                  writePersistedBuffer(repoPath, buffer, activeId)
+                  setRepoPath(nextRepo)
                   setFiles([])
                   setAllFiles([])
                   setExpandedDirs(new Set())
-                  loadStatus(e.target.value)
+                  // Restore this repo's previously open tabs (if any). The
+                  // buffer stays empty until loadStatus fires; the restore
+                  // runs once on mount of the new repo below.
+                  const restored = readPersistedBuffer(nextRepo)
+                  if (restored) {
+                    const seeded: BufferEntry[] = restored.tabs.map(t => ({
+                      id: makeTabId(nextRepo, t.file, t.staged, t.fromAll),
+                      file: t.file,
+                      staged: t.staged,
+                      fromAll: t.fromAll,
+                      diff: "",
+                      diffLoading: false,
+                      raw: "",
+                      rawError: "",
+                      md: "",
+                      mdRender: false,
+                      viewMode: "split",
+                      editMode: false,
+                      editContent: "",
+                      dirty: false,
+                    }))
+                    setBuffer(seeded)
+                    setActiveId(
+                      restored.activeId && seeded.some(b => b.id === restored.activeId)
+                        ? restored.activeId
+                        : seeded[0]?.id ?? null
+                    )
+                  } else {
+                    setBuffer([])
+                    setActiveId(null)
+                  }
+                  persistedRepoRef.current = nextRepo
+                  // Update the canonical URL so reloads keep the same project.
+                  const firstProject = projects.projects[0]
+                  const newUrl = firstProject && firstProject.dir === nextRepo
+                    ? window.location.pathname
+                    : `${window.location.pathname}?project=${encodeURIComponent(projects.projects.find(p => p.dir === nextRepo)?.name ?? "")}`
+                  window.history.replaceState(null, "", newUrl)
+                  loadStatus(nextRepo)
                 }}
                 title={repoPath}
                 className="h-9 w-full cursor-pointer rounded-md border border-input bg-background pl-9 pr-3 font-mono text-sm text-foreground focus:outline-none focus:ring-2 focus:ring-ring"
@@ -1435,6 +1801,7 @@ export default function GitReviewPage() {
               >
                 <div className="min-h-0 flex-1" data-sidebar-body>
                   <ScrollArea className="h-full">
+                    {/* eslint-disable-next-line react-hooks/refs -- sidebarContent is a render-time helper that returns JSX; the ref usage it transitively contains is inside event handlers (loadDiff/runAction/refreshTab), not during render */}
                     <div className="space-y-1 py-2 pr-2">{sidebarContent(() => {})}</div>
                   </ScrollArea>
                 </div>
@@ -1451,27 +1818,101 @@ export default function GitReviewPage() {
 
           {/* Diff viewer: fills the remaining space, no max-width constraint */}
           <main className="flex min-w-0 flex-1 flex-col overflow-hidden p-2 sm:p-4">
+            {/* Tab strip — one entry per open file. Click a tab to activate +
+                refetch; × to close; ↻ to refresh without changing focus. */}
+            {buffer.length > 0 && (
+              <div
+                role="tablist"
+                aria-label="Open files"
+                className="diff-tabs mb-1 flex min-h-8 flex-nowrap items-center gap-1 overflow-x-auto rounded-md border border-border bg-card px-1 py-1"
+              >
+                {buffer.map(entry => {
+                  const isActive = entry.id === activeId
+                  const basename = entry.file.split("/").pop() ?? entry.file
+                  const status = files.find(f => f.path === entry.file && f.staged === entry.staged)?.status
+                    ?? (entry.fromAll ? "untracked" : "modified")
+                  return (
+                    <div
+                      key={entry.id}
+                      role="tab"
+                      aria-selected={isActive}
+                      data-tab-id={entry.id}
+                      className={`group flex h-7 shrink-0 items-center gap-1 rounded-md border px-2 text-xs outline-none transition-colors ${isActive ? "border-primary/40 bg-primary/10 text-foreground" : "border-transparent text-muted-foreground hover:bg-accent hover:text-accent-foreground"}`}
+                    >
+                      <Tooltip>
+                        <TooltipTrigger asChild>
+                          <button
+                            type="button"
+                            onClick={() => setActiveId(entry.id)}
+                            className="flex min-w-0 items-center gap-1.5 text-left"
+                          >
+                            <span className="shrink-0">{statusIcon(status)}</span>
+                            <span className="max-w-40 truncate">{basename}</span>
+                            {entry.dirty && <span className="size-1.5 shrink-0 rounded-full bg-amber-500" aria-label="Unsaved changes" />}
+                            {entry.diffLoading && <RefreshCw size={11} className="shrink-0 animate-spin text-muted-foreground" />}
+                          </button>
+                        </TooltipTrigger>
+                        <TooltipContent side="bottom" className="max-w-xs">
+                          <p className="text-xs">{entry.file}{entry.staged ? " (staged)" : ""}{entry.fromAll ? " (from All Files)" : ""}</p>
+                        </TooltipContent>
+                      </Tooltip>
+                      <Tooltip>
+                        <TooltipTrigger asChild>
+                          <button
+                            type="button"
+                            aria-label={`Refresh ${entry.file}`}
+                            disabled={entry.diffLoading}
+                            onClick={e => { e.stopPropagation(); refreshTab(entry) }}
+                            className="flex h-5 w-5 shrink-0 items-center justify-center rounded text-muted-foreground hover:bg-accent hover:text-foreground disabled:opacity-40"
+                          >
+                            <RefreshCw size={11} />
+                          </button>
+                        </TooltipTrigger>
+                        <TooltipContent side="bottom">Refresh</TooltipContent>
+                      </Tooltip>
+                      <Tooltip>
+                        <TooltipTrigger asChild>
+                          <button
+                            type="button"
+                            aria-label={`Close ${entry.file}`}
+                            onClick={e => {
+                              e.stopPropagation()
+                              if (entry.dirty && !window.confirm("Discard unsaved changes?")) return
+                              closeTab(entry.id)
+                            }}
+                            className="flex h-5 w-5 shrink-0 items-center justify-center rounded text-muted-foreground hover:bg-destructive hover:text-destructive-foreground"
+                          >
+                            <X size={11} />
+                          </button>
+                        </TooltipTrigger>
+                        <TooltipContent side="bottom">Close tab</TooltipContent>
+                      </Tooltip>
+                    </div>
+                  )
+                })}
+              </div>
+            )}
             <Card ref={diffCardRef} className="diff-card flex min-h-0 flex-1 flex-col overflow-hidden">
               <CardHeader className="shrink-0 p-3 pb-2">
                 <div className="flex items-center justify-between gap-2">
                   <CardTitle className="truncate text-sm">
-                    {selectedFile ? selectedFile.split("/").pop() : "Select a file"}
+                    {active ? active.file.split("/").pop() : "Select a file"}
                   </CardTitle>
-                  {selectedFile && (
+                  {active && (
                     <div className="flex items-center gap-1">
-                      {editMode && (
+                      {active.editMode && (
                         <Button
                           variant="default"
                           size="sm"
                           className="h-7 gap-1"
-                          disabled={editContent === rawContent || isSaving}
+                          disabled={!active.dirty || isSaving}
                           onClick={saveFile}
                         >
                           {isSaving ? <RefreshCw size={13} className="animate-spin" /> : <Save size={13} />}
                           Save
                         </Button>
                       )}
-                      {!selectedFromAll && !editMode && (
+                      {!active.fromAll && !active.editMode && (
                         <Tooltip>
                           <TooltipTrigger asChild>
                             <Button
@@ -1480,34 +1921,34 @@ export default function GitReviewPage() {
                               className="h-7 w-7"
                               disabled={!!busyAction}
                               onClick={() => {
-                                if (selectedStaged) {
-                                  runAction("unstage", { files: [selectedFile] })
+                                if (active.staged) {
+                                  runAction("unstage", { files: [active.file] })
                                 } else {
-                                  runAction("add", { files: [selectedFile] })
+                                  runAction("add", { files: [active.file] })
                                 }
                               }}
                             >
-                              {busyAction === "add" || busyAction === "unstage" ? <RefreshCw size={13} className="animate-spin" /> : selectedStaged ? <Minus size={13} /> : <Plus size={13} />}
+                              {busyAction === "add" || busyAction === "unstage" ? <RefreshCw size={13} className="animate-spin" /> : active.staged ? <Minus size={13} /> : <Plus size={13} />}
                             </Button>
                           </TooltipTrigger>
-                          <TooltipContent side="left">{selectedStaged ? "Unstage this file" : "Stage this file"}</TooltipContent>
+                          <TooltipContent side="left">{active.staged ? "Unstage this file" : "Stage this file"}</TooltipContent>
                         </Tooltip>
                       )}
-                      {isMarkdownFile(selectedFile) && !editMode && (
+                      {isMarkdownFile(active.file) && !active.editMode && (
                         <Button
-                          variant={mdRender ? "default" : "outline"}
+                          variant={active.mdRender ? "default" : "outline"}
                           size="icon"
                           className="h-7 w-7"
                           title="Render as Markdown"
                           onClick={() => {
-                            if (!mdRender) loadMarkdown(selectedFile)
-                            setMdRender(!mdRender)
+                            if (!active.mdRender) loadMarkdown(active)
+                            updateEntry(active.id, { mdRender: !active.mdRender })
                           }}
                         >
                           <Eye size={13} />
                         </Button>
                       )}
-                      {canEdit(selectedFile) && !editMode && (
+                      {canEdit(active.file) && !active.editMode && (
                         <Tooltip>
                           <TooltipTrigger asChild>
                             <Button
@@ -1523,7 +1964,7 @@ export default function GitReviewPage() {
                           <TooltipContent side="left">Edit file</TooltipContent>
                         </Tooltip>
                       )}
-                      {selectedFromAll && selectedFile && !editMode && (
+                      {active.fromAll && !active.editMode && (
                         <Tooltip>
                           <TooltipTrigger asChild>
                             <Button
@@ -1531,7 +1972,7 @@ export default function GitReviewPage() {
                               size="icon"
                               className="h-7 w-7 text-destructive hover:text-destructive"
                               title="Delete file"
-                              onClick={() => openDeleteDialog(selectedFile)}
+                              onClick={() => openDeleteDialog(active.file)}
                             >
                               <Trash2 size={13} />
                             </Button>
@@ -1539,7 +1980,7 @@ export default function GitReviewPage() {
                           <TooltipContent side="left">Delete file</TooltipContent>
                         </Tooltip>
                       )}
-                      {editMode && (
+                      {active.editMode && (
                         <Tooltip>
                           <TooltipTrigger asChild>
                             <Button
@@ -1555,24 +1996,27 @@ export default function GitReviewPage() {
                           <TooltipContent side="left">Cancel editing</TooltipContent>
                         </Tooltip>
                       )}
-                      {!selectedFromAll && !editMode && (
+                      {!active.fromAll && !active.editMode && (
                         <>
                           <Button
-                            variant={viewMode === "raw" ? "default" : "outline"}
+                            variant={active.viewMode === "raw" ? "default" : "outline"}
                             size="icon"
                             className="h-7 w-7"
                             title="View raw file (syntax highlighted)"
                             onClick={() => {
-                              setViewMode("raw")
-                              if (rawFile !== selectedFile || rawError) loadRaw(selectedFile)
+                              const next = active.viewMode === "raw" ? "split" : "raw"
+                              updateEntry(active.id, { viewMode: next })
+                              if (next === "raw" && (!active.raw || active.rawError)) {
+                                void fetchRaw(active)
+                              }
                             }}
                           >
                             <FileCode size={13} />
                           </Button>
-                          <Button variant={viewMode === "unified" ? "default" : "outline"} size="icon" className="h-7 w-7" onClick={() => setViewMode("unified")}>
+                          <Button variant={active.viewMode === "unified" ? "default" : "outline"} size="icon" className="h-7 w-7" onClick={() => updateEntry(active.id, { viewMode: "unified" })}>
                             <AlignJustify size={13} />
                           </Button>
-                          <Button variant={viewMode === "split" ? "default" : "outline"} size="icon" className="h-7 w-7" onClick={() => setViewMode("split")}>
+                          <Button variant={active.viewMode === "split" ? "default" : "outline"} size="icon" className="h-7 w-7" onClick={() => updateEntry(active.id, { viewMode: "split" })}>
                             <Split size={13} />
                           </Button>
                         </>
@@ -1589,57 +2033,62 @@ export default function GitReviewPage() {
                     </div>
                   )}
                 </div>
-                {selectedFile && (
-                  <p className="mt-1 truncate text-xs text-muted-foreground">{selectedFile}</p>
+                {active && (
+                  <p className="mt-1 truncate text-xs text-muted-foreground">{active.file}</p>
                 )}
               </CardHeader>
               <Separator />
               <CardContent className="diff-content min-h-0 flex-1 p-0">
-                {editMode && selectedFile ? (
+                {active?.editMode ? (
                   <EditView
-                    content={editContent}
-                    file={selectedFile}
-                    onChange={setEditContent}
+                    content={active.editContent}
+                    file={active.file}
+                    onChange={v => updateEntry(active.id, { editContent: v, dirty: v !== active.raw })}
                   />
                 ) : (
-                  <ScrollArea className="diff-scroll h-full">
-                    {diffLoading && !selectedFromAll ? (
-                      <div className="flex items-center justify-center h-32">
-                        <RefreshCw size={20} className="animate-spin text-muted-foreground" />
-                      </div>
-                    ) : selectedFromAll && selectedFile ? (
-                      mdRender && isMarkdownFile(selectedFile) ? (
-                        <MarkdownView content={mdContent} />
-                      ) : rawError ? (
-                        <div className="p-4 text-sm text-destructive whitespace-pre-wrap break-words">{rawError}</div>
-                      ) : rawContent ? (
-                        <CodeView content={rawContent} file={selectedFile} fullPath={selectedFullPath} />
-                      ) : (
-                        <div className="flex items-center justify-center h-32">
-                          <RefreshCw size={20} className="animate-spin text-muted-foreground" />
-                        </div>
-                      )
-                    ) : mdRender && isMarkdownFile(selectedFile ?? "") ? (
-                      <MarkdownView content={mdContent} />
-                    ) : viewMode === "raw" && selectedFile ? (
-                      rawError ? (
-                        <div className="p-4 text-sm text-destructive whitespace-pre-wrap break-words">{rawError}</div>
-                      ) : rawContent ? (
-                        <CodeView content={rawContent} file={selectedFile} fullPath={selectedFullPath} />
-                      ) : (
-                        <div className="flex items-center justify-center h-32">
-                          <RefreshCw size={20} className="animate-spin text-muted-foreground" />
-                        </div>
-                      )
-                    ) : fileDiff ? (
-                      <DiffView raw={fileDiff} view={viewMode === "split" ? "split" : "unified"} fullPath={selectedFullPath} />
-                    ) : (
+                  <div className="diff-scroll h-full overflow-auto">
+                    {!active ? (
                       <div className="flex flex-col items-center justify-center h-40 text-muted-foreground">
                         <GitCommit size={24} />
                         <p className="text-sm mt-2">Select a file to view diff</p>
                       </div>
+                    ) : active.diffLoading && !active.fromAll ? (
+                      <div className="flex items-center justify-center h-32">
+                        <RefreshCw size={20} className="animate-spin text-muted-foreground" />
+                      </div>
+                    ) : active.fromAll ? (
+                      active.mdRender && isMarkdownFile(active.file) ? (
+                        <MarkdownView content={active.md} />
+                      ) : active.rawError ? (
+                        <div className="p-4 text-sm text-destructive whitespace-pre-wrap break-words">{active.rawError}</div>
+                      ) : active.raw ? (
+                        <CodeView content={active.raw} file={active.file} fullPath={selectedFullPath} />
+                      ) : (
+                        <div className="flex items-center justify-center h-32">
+                          <RefreshCw size={20} className="animate-spin text-muted-foreground" />
+                        </div>
+                      )
+                    ) : active.mdRender && isMarkdownFile(active.file) ? (
+                      <MarkdownView content={active.md} />
+                    ) : active.viewMode === "raw" ? (
+                      active.rawError ? (
+                        <div className="p-4 text-sm text-destructive whitespace-pre-wrap break-words">{active.rawError}</div>
+                      ) : active.raw ? (
+                        <CodeView content={active.raw} file={active.file} fullPath={selectedFullPath} />
+                      ) : (
+                        <div className="flex items-center justify-center h-32">
+                          <RefreshCw size={20} className="animate-spin text-muted-foreground" />
+                        </div>
+                      )
+                    ) : active.diff ? (
+                      <DiffView raw={active.diff} view={active.viewMode === "split" ? "split" : "unified"} fullPath={selectedFullPath} />
+                    ) : (
+                      <div className="flex flex-col items-center justify-center h-40 text-muted-foreground">
+                        <GitCommit size={24} />
+                        <p className="text-sm mt-2">No changes for this file</p>
+                      </div>
                     )}
-                  </ScrollArea>
+                  </div>
                 )}
               </CardContent>
             </Card>
@@ -1656,8 +2105,9 @@ export default function GitReviewPage() {
               </SheetTitle>
               <SheetDescription className="sr-only">Browse repository files</SheetDescription>
             </SheetHeader>
-            <div className="min-h-0 flex-1" data-sidebar-body>
+              <div className="min-h-0 flex-1" data-sidebar-body>
               <ScrollArea className="h-full">
+                {/* eslint-disable-next-line react-hooks/refs -- sidebarContent is a render-time helper that returns JSX; the ref usage it transitively contains is inside event handlers (loadDiff/runAction/refreshTab), not during render */}
                 <div className="space-y-1 py-2 pr-2">{sidebarContent(() => setMobileOpen(false))}</div>
               </ScrollArea>
             </div>

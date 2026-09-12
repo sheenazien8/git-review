@@ -10,10 +10,15 @@ export async function GET(req: NextRequest) {
   const file = searchParams.get("file") || ""
   // "0" = unstaged side, "1" = staged side; absent = legacy (diff vs HEAD)
   const staged = searchParams.get("staged")
+  // Source path when `file` is a rename target — git's path-only matching hides
+  // renames, so we pass both paths positionally with `-M50` to keep detection on.
+  const oldPath = searchParams.get("oldPath") || ""
 
   if (!file) {
     return NextResponse.json({ error: "No file specified" }, { status: 400 })
   }
+
+  const diffArgs = [oldPath, file].filter(Boolean)
 
   try {
     // Detect if file is untracked
@@ -39,30 +44,30 @@ export async function GET(req: NextRequest) {
       // Index vs HEAD. In a repo with no commits yet there is no HEAD, so diff
       // against the empty tree instead (the whole staged file shows as added).
       try {
-        stdout = (await execAsync(`git diff --cached -- "${file}"`, {
-          cwd: repo,
-          maxBuffer: 10 * 1024 * 1024,
-        })).stdout
+        stdout = (await execAsync(
+          `git diff --cached -M50 --find-renames=50 -- ${diffArgs.map(a => `"${a}"`).join(" ")}`,
+          { cwd: repo, maxBuffer: 10 * 1024 * 1024 }
+        )).stdout
       } catch (e) {
         const stderr = (e as { stderr?: string }).stderr || ""
         if (!/Failed to resolve 'HEAD'|bad revision|unknown revision/i.test(stderr)) throw e
         stdout = (await execAsync(
-          `git diff --cached 4b825dc642cb6eb9a060e54bf8d69288fbee4904 -- "${file}"`,
+          `git diff --cached -M50 --find-renames=50 4b825dc642cb6eb9a060e54bf8d69288fbee4904 -- ${diffArgs.map(a => `"${a}"`).join(" ")}`,
           { cwd: repo, maxBuffer: 10 * 1024 * 1024 }
         )).stdout
       }
     } else if (staged === "0") {
       // Worktree vs index — exactly the unstaged portion
-      stdout = (await execAsync(`git diff -- "${file}"`, {
-        cwd: repo,
-        maxBuffer: 10 * 1024 * 1024,
-      })).stdout
+      stdout = (await execAsync(
+        `git diff -M50 --find-renames=50 -- ${diffArgs.map(a => `"${a}"`).join(" ")}`,
+        { cwd: repo, maxBuffer: 10 * 1024 * 1024 }
+      )).stdout
     } else {
       // Legacy: diff against HEAD so both staged and unstaged changes show.
-      const r = await execAsync(`git diff HEAD -- "${file}"`, {
-        cwd: repo,
-        maxBuffer: 10 * 1024 * 1024,
-      })
+      const r = await execAsync(
+        `git diff HEAD -M50 --find-renames=50 -- ${diffArgs.map(a => `"${a}"`).join(" ")}`,
+        { cwd: repo, maxBuffer: 10 * 1024 * 1024 }
+      )
       stdout = r.stdout
     }
 
