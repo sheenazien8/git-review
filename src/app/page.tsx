@@ -1,7 +1,7 @@
 "use client"
 
 import { useState, useCallback, useEffect, useMemo, useRef, useSyncExternalStore } from "react"
-import { parseDiff } from "@/lib/utils"
+import { parseDiff, cn } from "@/lib/utils"
 import {
   GitBranch,
   GitCommit,
@@ -12,6 +12,7 @@ import {
   File,
   ChevronRight,
   ChevronDown,
+  ChevronUp,
   PanelLeft,
   Menu,
   RefreshCw,
@@ -178,6 +179,196 @@ function useCopyRange(fullPath: string) {
   return { copiedKey, anchor, click, rangePreview, setHover }
 }
 
+// ---------------------------------------------------------------------------
+// In-file find
+// ---------------------------------------------------------------------------
+
+function escapeRegExp(value: string) {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")
+}
+
+interface TextMatch {
+  start: number
+  end: number
+}
+
+function findMatches(text: string, query: string, caseSensitive: boolean): TextMatch[] {
+  if (!query) return []
+  const flags = caseSensitive ? "g" : "gi"
+  const re = new RegExp(escapeRegExp(query), flags)
+  const matches: TextMatch[] = []
+  let m: RegExpExecArray | null
+  while ((m = re.exec(text)) !== null) {
+    matches.push({ start: m.index, end: m.index + m[0].length })
+    if (m[0].length === 0) re.lastIndex++
+  }
+  return matches
+}
+
+interface HighlightSegment {
+  kind: "text" | "mark"
+  text: string
+  active: boolean
+  globalIndex?: number
+}
+
+function highlightTextSegments(
+  text: string,
+  matches: TextMatch[],
+  activeIndex: number,
+  startAt: number
+): { segments: HighlightSegment[]; count: number } {
+  const segments: HighlightSegment[] = []
+  let last = 0
+  let count = 0
+  for (const match of matches) {
+    if (match.start > last) {
+      segments.push({ kind: "text", text: text.slice(last, match.start), active: false })
+    }
+    const globalIndex = startAt + count
+    segments.push({
+      kind: "mark",
+      text: text.slice(match.start, match.end),
+      active: globalIndex === activeIndex,
+      globalIndex,
+    })
+    count++
+    last = match.end
+  }
+  if (last < text.length) {
+    segments.push({ kind: "text", text: text.slice(last), active: false })
+  }
+  return { segments, count }
+}
+
+function HighlightSegments({ segments }: { segments: HighlightSegment[] }) {
+  return (
+    <>
+      {segments.map((seg, i) =>
+        seg.kind === "mark" ? (
+          <mark
+            key={i}
+            className={cn(
+              "rounded-sm",
+              seg.active
+                ? "bg-primary text-primary-foreground ring-1 ring-ring"
+                : "bg-primary/25 text-foreground"
+            )}
+            data-find-match={seg.active ? seg.globalIndex : undefined}
+          >
+            {seg.text}
+          </mark>
+        ) : (
+          <span key={i}>{seg.text}</span>
+        )
+      )}
+    </>
+  )
+}
+
+function ScrollToActiveMatch({ index }: { index: number | undefined }) {
+  useEffect(() => {
+    if (index === undefined || index < 0) return
+    const el = document.querySelector(`[data-find-match="${index}"]`)
+    if (el instanceof HTMLElement) {
+      el.scrollIntoView({ block: "center", inline: "nearest" })
+    }
+  }, [index])
+  return null
+}
+
+interface FindBarProps {
+  query: string
+  caseSensitive: boolean
+  total: number
+  index: number
+  onQueryChange: (value: string) => void
+  onCaseToggle: () => void
+  onPrev: () => void
+  onNext: () => void
+  onClose: () => void
+}
+
+function FindBar({ query, caseSensitive, total, index, onQueryChange, onCaseToggle, onPrev, onNext, onClose }: FindBarProps) {
+  const inputRef = useRef<HTMLInputElement>(null)
+  useEffect(() => {
+    inputRef.current?.focus()
+    inputRef.current?.select()
+  }, [])
+
+  const displayIndex = total > 0 ? ((index % total) + total) % total + 1 : 0
+
+  return (
+    <div className="flex items-center gap-1.5 rounded-md border border-border bg-muted/40 px-2 py-1">
+      <Search size={14} className="shrink-0 text-muted-foreground" />
+      <input
+        ref={inputRef}
+        data-find-input
+        type="text"
+        value={query}
+        onChange={e => onQueryChange(e.target.value)}
+        onKeyDown={e => {
+          if (e.key === "Enter") {
+            e.preventDefault()
+            if (e.shiftKey) onPrev()
+            else onNext()
+          } else if (e.key === "Escape") {
+            e.preventDefault()
+            onClose()
+          }
+        }}
+        placeholder="Find…"
+        className="h-7 min-w-0 flex-1 bg-transparent text-sm text-foreground placeholder:text-muted-foreground focus:outline-none"
+      />
+      <Button
+        type="button"
+        variant={caseSensitive ? "default" : "outline"}
+        size="icon"
+        className="h-6 w-6 shrink-0 text-[10px]"
+        title="Match case"
+        onClick={onCaseToggle}
+      >
+        <span className={caseSensitive ? "underline" : ""}>Aa</span>
+      </Button>
+      <span className="shrink-0 px-1 text-xs tabular-nums text-muted-foreground">
+        {displayIndex}/{total}
+      </span>
+      <Button
+        type="button"
+        variant="outline"
+        size="icon"
+        className="h-6 w-6 shrink-0"
+        title="Previous match (Shift+Enter)"
+        disabled={total === 0}
+        onClick={onPrev}
+      >
+        <ChevronUp size={14} />
+      </Button>
+      <Button
+        type="button"
+        variant="outline"
+        size="icon"
+        className="h-6 w-6 shrink-0"
+        title="Next match (Enter)"
+        disabled={total === 0}
+        onClick={onNext}
+      >
+        <ChevronDown size={14} />
+      </Button>
+      <Button
+        type="button"
+        variant="ghost"
+        size="icon"
+        className="h-6 w-6 shrink-0 text-muted-foreground"
+        title="Close (Esc)"
+        onClick={onClose}
+      >
+        <X size={14} />
+      </Button>
+    </div>
+  )
+}
+
 function statusIcon(s: string) {
   switch (s) {
     case "modified": return <FilePen size={14} />
@@ -252,6 +443,11 @@ interface BufferEntry {
   dirty: boolean
   // Optional rename hint from git status (oldPath → file).
   oldPath?: string
+  // In-file find state, scoped to this tab.
+  findOpen: boolean
+  findQuery: string
+  findCaseSensitive: boolean
+  findMatchIndex: number
 }
 
 function makeTabId(repo: string, file: string, staged: boolean, fromAll: boolean) {
@@ -391,9 +587,54 @@ function buildTree(entries: { path: string; status: string; type?: string }[]): 
   return root.children
 }
 
-function DiffView({ raw, view, fullPath }: { raw: string; view: "unified" | "split"; fullPath: string }) {
+function DiffView({ raw, view, fullPath, findQuery, findCaseSensitive, findMatchIndex }: { raw: string; view: "unified" | "split"; fullPath: string; findQuery?: string; findCaseSensitive?: boolean; findMatchIndex?: number }) {
   const hunks = parseDiff(raw)
   const { copiedKey, anchor, click, rangePreview, setHover } = useCopyRange(fullPath)
+  const findActive = !!(findQuery && findMatchIndex !== undefined)
+  const displayText = useMemo(() =>
+    hunks.map(hunk => [hunk.header, ...hunk.lines.map(line => line.content)].join("\n")).join("\n"),
+    [hunks]
+  )
+  const matches = useMemo(() => findMatches(displayText, findQuery ?? "", findCaseSensitive ?? false), [displayText, findQuery, findCaseSensitive])
+
+  const highlightedHunks = useMemo(() => {
+    if (!findActive || hunks.length === 0) {
+      return hunks.map(hunk => ({
+        headerSegments: [] as HighlightSegment[],
+        lineSegments: hunk.lines.map(() => [] as HighlightSegment[]),
+      }))
+    }
+    const chunks = hunks.flatMap((hunk, hi) => [
+      { hunkIndex: hi, lineIndex: null as number | null, text: hunk.header },
+      ...hunk.lines.map((line, li) => ({ hunkIndex: hi, lineIndex: li as number | null, text: line.content })),
+    ])
+    const positions = chunks.map((_, i) =>
+      i === 0 ? 0 : chunks.slice(0, i).reduce((s, c) => s + c.text.length + 1, 0)
+    )
+    const chunkMatches = chunks.map((c, i) => {
+      const start = positions[i]
+      const end = start + c.text.length
+      return matches
+        .filter(m => m.start < end && m.end > start)
+        .map(m => ({
+          start: Math.max(m.start, start) - start,
+          end: Math.min(m.end, end) - start,
+        }))
+    })
+    const counts = chunks.map((c, i) => highlightTextSegments(c.text, chunkMatches[i], -1, 0).count)
+    const prefix = chunks.map((_, i) => counts.slice(0, i).reduce((s, c) => s + c, 0))
+    const highlighted = chunks.map((c, i) => ({
+      ...c,
+      segments: highlightTextSegments(c.text, chunkMatches[i], findMatchIndex ?? -1, prefix[i]).segments,
+    }))
+    const byKey = Object.fromEntries(
+      highlighted.map(h => [`${h.hunkIndex}:${h.lineIndex ?? "h"}`, h.segments])
+    )
+    return hunks.map((hunk, hi) => ({
+      headerSegments: (byKey[`${hi}:h`] as HighlightSegment[] | undefined) ?? [],
+      lineSegments: hunk.lines.map((_, li) => (byKey[`${hi}:${li}`] as HighlightSegment[] | undefined) ?? []),
+    }))
+  }, [hunks, matches, findActive, findMatchIndex])
 
   if (hunks.length === 0) {
     const rename = raw.match(/^rename from (.+)\nrename to (.+)$/m)
@@ -423,7 +664,9 @@ function DiffView({ raw, view, fullPath }: { raw: string; view: "unified" | "spl
 
   return (
     <div className="font-mono text-xs" onMouseLeave={() => setHover(null)}>
-      {hunks.map((hunk, hi) => (
+      {hunks.map((hunk, hi) => {
+        const { headerSegments, lineSegments } = highlightedHunks[hi]
+        return (
         <table key={hi} className="min-w-full border-collapse">
           <thead>
             <tr>
@@ -431,7 +674,7 @@ function DiffView({ raw, view, fullPath }: { raw: string; view: "unified" | "spl
                 colSpan={view === "split" ? 2 : 3}
                 className={`${hunkBg} px-2 py-1 sticky top-0 z-10`}
               >
-                {hunk.header}
+                {findActive ? <HighlightSegments segments={headerSegments} /> : hunk.header}
               </td>
             </tr>
           </thead>
@@ -462,7 +705,9 @@ function DiffView({ raw, view, fullPath }: { raw: string; view: "unified" | "spl
                     <td className={`w-10 select-none border-r border-border bg-muted text-right text-xs text-muted-foreground pr-1 ${numCls}`}>
                       {copied ? <Check size={12} className="inline-block align-middle" /> : isAnchor ? lineNo : shown ?? ""}
                     </td>
-                    <td className={`whitespace-pre pl-1 ${contentBg}`}>{line.content}</td>
+                    <td className={`whitespace-pre pl-1 ${contentBg}`}>
+                      {findActive ? <HighlightSegments segments={lineSegments[li]} /> : line.content}
+                    </td>
                   </tr>
                 )
               }
@@ -483,13 +728,16 @@ function DiffView({ raw, view, fullPath }: { raw: string; view: "unified" | "spl
                     {copied ? <Check size={12} className="inline-block align-middle" /> : lineNo ?? ""}
                   </td>
                   <td className="w-5 select-none text-center">{prefix}</td>
-                  <td className="whitespace-pre pl-2">{line.content}</td>
+                  <td className="whitespace-pre pl-2">
+                    {findActive ? <HighlightSegments segments={lineSegments[li]} /> : line.content}
+                  </td>
                 </tr>
               )
             })}
           </tbody>
         </table>
-      ))}
+      )})}
+      {findActive && <ScrollToActiveMatch index={findMatchIndex} />}
     </div>
   )
 }
@@ -510,28 +758,209 @@ const extToLang: Record<string, string> = {
   dockerfile: "dockerfile", makefile: "makefile",
 }
 
-function CodeView({ content, file, fullPath }: { content: string; file: string; fullPath: string }) {
+// hljs's core escapeHTML() (node_modules/highlight.js/lib/core.js) escapes
+// &, <, >, ", and ' — the last two as multi-character entities (&quot;,
+// &#x27;). TextMatch offsets come from the *raw* file content, so 1 raw
+// character can correspond to a multi-character entity in the highlighted
+// HTML. Naively walking the HTML string char-by-char (as if 1 HTML char ==
+// 1 text char) drifts the position mapping the moment a quote/apostrophe/&
+// appears, corrupting the marks it inserts — e.g. splitting "&quot;" so the
+// page renders the literal text "quot;" instead of a quote character.
+const HTML_ENTITIES: Array<{ entity: string }> = [
+  { entity: "&amp;" },
+  { entity: "&quot;" },
+  { entity: "&#x27;" },
+  { entity: "&lt;" },
+  { entity: "&gt;" },
+]
+
+// Maps a run of escaped HTML text back to raw-text positions without
+// decoding it — `boundaries[i]` is the raw HTML index where decoded
+// character `i` starts, so `value.slice(boundaries[a], boundaries[b])`
+// yields the (still-escaped) HTML for decoded characters [a, b).
+function htmlTextRunBoundaries(value: string): { boundaries: number[]; decodedLength: number } {
+  const boundaries: number[] = [0]
+  let i = 0
+  while (i < value.length) {
+    const entity = HTML_ENTITIES.find(e => value.startsWith(e.entity, i))
+    i += entity ? entity.entity.length : 1
+    boundaries.push(i)
+  }
+  return { boundaries, decodedLength: boundaries.length - 1 }
+}
+
+function highlightHtmlWithMatches(
+  html: string,
+  matches: TextMatch[],
+  activeIndex: number,
+  activeGlobalIndex: number
+): string {
+  if (matches.length === 0) return html
+
+  type Token =
+    | { type: "text"; value: string }
+    | { type: "tag"; value: string }
+
+  const tokens: Token[] = []
+  let i = 0
+  while (i < html.length) {
+    if (html[i] === "<") {
+      const close = html.indexOf(">", i)
+      if (close === -1) {
+        tokens.push({ type: "text", value: html.slice(i) })
+        break
+      }
+      tokens.push({ type: "tag", value: html.slice(i, close + 1) })
+      i = close + 1
+    } else {
+      const nextTag = html.indexOf("<", i)
+      const end = nextTag === -1 ? html.length : nextTag
+      tokens.push({ type: "text", value: html.slice(i, end) })
+      i = end
+    }
+  }
+
+  let output = ""
+  let pos = 0
+  let activeMatch: number | null = null
+
+  const openMark = (idx: number) => {
+    if (idx === activeIndex) {
+      output += `<mark class="bg-primary text-primary-foreground ring-1 ring-ring rounded-sm" data-find-match="${activeGlobalIndex}">`
+    } else {
+      output += '<mark class="bg-primary/25 text-foreground rounded-sm">'
+    }
+    activeMatch = idx
+  }
+
+  const closeMark = () => {
+    if (activeMatch !== null) {
+      output += "</mark>"
+      activeMatch = null
+    }
+  }
+
+  const startsAt = (textPos: number) => matches.findIndex(m => m.start === textPos)
+  const endsAt = (textPos: number) => matches.findIndex(m => m.end === textPos)
+
+  for (const token of tokens) {
+    if (token.type === "tag") {
+      const wasActive = activeMatch
+      if (wasActive !== null) {
+        const endIdx = endsAt(pos)
+        if (endIdx !== -1 && matches[endIdx].end === pos) {
+          closeMark()
+          output += token.value
+          continue
+        }
+        closeMark()
+        output += token.value
+        openMark(wasActive)
+      } else {
+        output += token.value
+      }
+      continue
+    }
+
+    // Decoded (raw-text) space, not HTML string space — this is what lines
+    // up with `matches`, which were computed against the plain file content.
+    const value = token.value
+    const { boundaries, decodedLength } = htmlTextRunBoundaries(value)
+    const startText = pos
+    let offset = 0
+    while (offset < decodedLength) {
+      const curText = startText + offset
+      const endIdx = endsAt(curText)
+      if (endIdx !== -1 && activeMatch === endIdx) {
+        closeMark()
+      }
+      const startIdx = startsAt(curText)
+      if (startIdx !== -1) {
+        openMark(startIdx)
+      }
+      const nextBoundary = Math.min(
+        decodedLength,
+        ...matches
+          .filter(m => m.start > curText || m.end > curText)
+          .map(m => (m.start > curText ? m.start : m.end) - startText)
+      )
+      // Slice the *original* escaped HTML at entity-safe boundaries — it is
+      // already valid HTML, so it must not be re-escaped (that would double
+      // -escape entities like &quot; into &amp;quot;).
+      output += value.slice(boundaries[offset], boundaries[nextBoundary])
+      offset = nextBoundary
+    }
+    pos = startText + decodedLength
+  }
+  closeMark()
+  return output
+}
+
+function escapeHtml(value: string): string {
+  return value.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;")
+}
+
+function CodeView({ content, file, fullPath, findQuery, findCaseSensitive, findMatchIndex }: { content: string; file: string; fullPath: string; findQuery?: string; findCaseSensitive?: boolean; findMatchIndex?: number }) {
+  const findActive = !!(findQuery && findMatchIndex !== undefined)
+  const { copiedKey, anchor, click, rangePreview, setHover } = useCopyRange(fullPath)
+
   const ext = file.split(".").pop()?.toLowerCase() ?? ""
   const lang = extToLang[ext]
-  let html: string
-  try {
-    if (lang && hljs.getLanguage(lang)) {
-      html = hljs.highlight(content, { language: lang, ignoreIllegals: true }).value
-    } else {
-      html = hljs.highlightAuto(content).value
+
+  const highlightedHtml = useMemo(() => {
+    try {
+      if (lang && hljs.getLanguage(lang)) {
+        return hljs.highlight(content, { language: lang, ignoreIllegals: true }).value
+      }
+      return hljs.highlightAuto(content).value
+    } catch {
+      return escapeHtml(content)
     }
-  } catch {
-    html = content
-  }
-  const lines = content.split("\n")
-  if (lines.length > 1 && lines[lines.length - 1] === "") lines.pop()
-  const { copiedKey, anchor, click, rangePreview, setHover } = useCopyRange(fullPath)
+  }, [content, lang])
+
+  const lines = useMemo(() => {
+    const split = content.split("\n")
+    if (split.length > 1 && split[split.length - 1] === "") split.pop()
+    return split
+  }, [content])
+
+  const htmlLines = useMemo(() => {
+    const split = highlightedHtml.split("\n")
+    if (split.length > 1 && split[split.length - 1] === "") split.pop()
+    return split
+  }, [highlightedHtml])
+
+  const matches = useMemo(
+    () => findMatches(content, findQuery ?? "", findCaseSensitive ?? false),
+    [content, findQuery, findCaseSensitive]
+  )
+
+  const lineStarts = useMemo(() => {
+    return lines.map((_, i) =>
+      i === 0 ? 0 : lines.slice(0, i).reduce((s, l) => s + l.length + 1, 0)
+    )
+  }, [lines])
+
+  const lineHtml = useMemo(() => {
+    if (!findActive) return htmlLines
+    return htmlLines.map((html, i) => {
+      const start = lineStarts[i]
+      const end = start + lines[i].length
+      const lineMatches = matches
+        .filter(m => m.start < end && m.end > start)
+        .map(m => ({
+          start: Math.max(m.start, start) - start,
+          end: Math.min(m.end, end) - start,
+        }))
+      const prefix = matches.filter(m => m.end <= start).length
+      const activeLocal = (findMatchIndex ?? 0) - prefix
+      const activeGlobalIndex = findMatchIndex ?? 0
+      return highlightHtmlWithMatches(html, lineMatches, activeLocal, activeGlobalIndex)
+    })
+  }, [htmlLines, lines, lineStarts, matches, findActive, findMatchIndex])
+
   return (
     <div className="flex text-xs font-mono" onMouseLeave={() => setHover(null)}>
-      {/* Clickable gutter: click a number to anchor it, click a second number
-          to copy "<repo>/<file>:<start>-<end>" (same number twice copies a single
-          line). The gutter shares the code's line-height (leading-5 / h-5) and
-          stays put while the code column scrolls horizontally. */}
       <div className="shrink-0 select-none border-r border-border bg-muted/30 py-4 leading-5 text-muted-foreground">
         {lines.map((_, i) => {
           const n = i + 1
@@ -553,15 +982,136 @@ function CodeView({ content, file, fullPath }: { content: string; file: string; 
         })}
       </div>
       <pre className="flex-1 overflow-x-auto p-4 leading-5">
-        {/* p-0! neutralizes the stylesheet's `pre code.hljs { padding: 1em }`
-            so the code text aligns with the gutter. */}
-        <code className="hljs p-0!" dangerouslySetInnerHTML={{ __html: html }} />
+        <code className="hljs p-0!">
+          {findActive
+            ? lineHtml.map((html, i) => (
+                <span
+                  key={i}
+                  className="block h-5 whitespace-pre"
+                  dangerouslySetInnerHTML={{ __html: html }}
+                />
+              ))
+            : <span dangerouslySetInnerHTML={{ __html: highlightedHtml }} />}
+        </code>
       </pre>
+      {findActive && <ScrollToActiveMatch index={findMatchIndex} />}
     </div>
   )
 }
 
-function MarkdownView({ content }: { content: string }) {
+function SearchableText({ content, fullPath, query, caseSensitive, matchIndex }: {
+  content: string
+  fullPath: string
+  query: string
+  caseSensitive: boolean
+  matchIndex: number
+}) {
+  const { copiedKey, anchor, click, rangePreview, setHover } = useCopyRange(fullPath)
+  const lines = useMemo(() => {
+    const split = content.split("\n")
+    if (split.length > 1 && split[split.length - 1] === "") split.pop()
+    return split
+  }, [content])
+  const matches = useMemo(() => findMatches(content, query, caseSensitive), [content, query, caseSensitive])
+  const lineStarts = useMemo(() => {
+    return lines.map((_, i) =>
+      i === 0 ? 0 : lines.slice(0, i).reduce((s, l) => s + l.length + 1, 0)
+    )
+  }, [lines])
+
+  const lineHighlights = useMemo(() => {
+    const matchesPerLine = lines.map((line, i) => {
+      const start = lineStarts[i]
+      const end = start + line.length
+      return matches
+        .filter(m => m.start < end && m.end > start)
+        .map(m => ({
+          start: Math.max(m.start, start) - start,
+          end: Math.min(m.end, end) - start,
+        }))
+    })
+    const counts = lines.map((line, i) => highlightTextSegments(line, matchesPerLine[i], -1, 0).count)
+    const prefix = lines.map((_, i) => counts.slice(0, i).reduce((s, c) => s + c, 0))
+    return lines.map((line, i) =>
+      highlightTextSegments(line, matchesPerLine[i], matchIndex, prefix[i])
+    )
+  }, [lines, lineStarts, matches, matchIndex])
+
+  return (
+    <div className="flex text-xs font-mono" onMouseLeave={() => setHover(null)}>
+      <div className="shrink-0 select-none border-r border-border bg-muted/30 py-4 leading-5 text-muted-foreground">
+        {lines.map((_, i) => {
+          const n = i + 1
+          const key = `r-${n}`
+          const copied = copiedKey === key
+          const isAnchor = anchor === n
+          const inPreview = rangePreview != null && n >= rangePreview[0] && n <= rangePreview[1]
+          return (
+            <div
+              key={n}
+              title={copyTitleFor(fullPath, anchor, n)}
+              onClick={() => click(n, key)}
+              onMouseEnter={() => setHover(n)}
+              className={`h-5 min-w-10 pl-3 pr-2 text-right cursor-pointer ${copied ? "text-green-600 dark:text-green-400" : ""} ${isAnchor ? "bg-primary! text-primary-foreground!" : inPreview ? "bg-primary/15!" : "hover:bg-accent"}`}
+            >
+              {copied ? <Check size={12} className="inline-block align-middle" /> : n}
+            </div>
+          )
+        })}
+      </div>
+      <pre className="flex-1 overflow-x-auto p-4 leading-5">
+        <code className="hljs p-0!">
+          {lines.map((line, i) => {
+            const res = lineHighlights[i]
+            return (
+              <span key={i} className="block h-5 whitespace-pre">
+                {res.segments.map((seg, j) =>
+                  seg.kind === "mark" ? (
+                    <mark
+                      key={j}
+                      className={cn(
+                        "rounded-sm",
+                        seg.active
+                          ? "bg-primary text-primary-foreground ring-1 ring-ring"
+                          : "bg-primary/25 text-foreground"
+                      )}
+                      data-find-match={seg.active ? seg.globalIndex : undefined}
+                    >
+                      {seg.text}
+                    </mark>
+                  ) : (
+                    <span key={j}>{seg.text}</span>
+                  )
+                )}
+              </span>
+            )
+          })}
+        </code>
+      </pre>
+      <ScrollToActiveMatch index={matchIndex} />
+    </div>
+  )
+}
+
+function MarkdownView({ content, fullPath, findQuery, findCaseSensitive, findMatchIndex }: {
+  content: string
+  fullPath: string
+  findQuery?: string
+  findCaseSensitive?: boolean
+  findMatchIndex?: number
+}) {
+  if (findQuery && findMatchIndex !== undefined) {
+    return (
+      <SearchableText
+        content={content}
+        fullPath={fullPath}
+        query={findQuery}
+        caseSensitive={findCaseSensitive ?? false}
+        matchIndex={findMatchIndex}
+      />
+    )
+  }
+
   return (
     <div className="p-4 prose prose-sm dark:prose-invert max-w-none prose-pre:p-0 prose-pre:bg-transparent prose-code:before:content-none prose-code:after:content-none">
       <Markdown
@@ -574,7 +1124,15 @@ function MarkdownView({ content }: { content: string }) {
   )
 }
 
-function EditView({ content, file, onChange }: { content: string; file: string; onChange: (v: string) => void }) {
+function EditView({ content, file, onChange, findQuery, findCaseSensitive, findMatchIndex, onMatchIndexClamp }: {
+  content: string
+  file: string
+  onChange: (v: string) => void
+  findQuery?: string
+  findCaseSensitive?: boolean
+  findMatchIndex?: number
+  onMatchIndexClamp?: (clamped: number) => void
+}) {
   const textareaRef = useRef<HTMLTextAreaElement>(null)
   const preRef = useRef<HTMLPreElement>(null)
   const gutterRef = useRef<HTMLDivElement>(null)
@@ -605,6 +1163,37 @@ function EditView({ content, file, onChange }: { content: string; file: string; 
     preRef.current.scrollLeft = ta.scrollLeft
     gutterRef.current.scrollTop = ta.scrollTop
   }, [])
+
+  useEffect(() => {
+    if (!findQuery || findMatchIndex === undefined) return
+    const ta = textareaRef.current
+    if (!ta) return
+    const matches = findMatches(content, findQuery, findCaseSensitive ?? false)
+    if (matches.length === 0) return
+    let idx = findMatchIndex % matches.length
+    if (idx < 0) idx += matches.length
+    if (idx !== findMatchIndex) {
+      onMatchIndexClamp?.(idx)
+    }
+    const match = matches[idx]
+    // Setting the selection range only takes effect reliably while the
+    // textarea is focused, but this effect re-runs on every keystroke typed
+    // into the find input (findQuery changes) — stealing focus here would
+    // redirect the next keystroke into the file content instead of the find
+    // box. Focus the textarea just long enough to apply the selection, then
+    // immediately hand focus back to whatever had it (the find input or a
+    // find-bar button).
+    const previousActive = document.activeElement
+    ta.focus()
+    ta.setSelectionRange(match.start, match.end)
+    const lineHeight = parseFloat(getComputedStyle(ta).lineHeight) || 20
+    const before = content.slice(0, match.start)
+    const line = before.split("\n").length
+    ta.scrollTop = Math.max(0, (line - 1) * lineHeight - ta.clientHeight / 2)
+    if (previousActive instanceof HTMLElement && previousActive !== ta) {
+      previousActive.focus()
+    }
+  }, [content, findQuery, findCaseSensitive, findMatchIndex, onMatchIndexClamp])
 
   return (
     <div className="flex h-full text-xs font-mono">
@@ -854,6 +1443,10 @@ export default function GitReviewPage() {
         editContent: "",
         dirty: false,
         oldPath,
+        findOpen: false,
+        findQuery: "",
+        findCaseSensitive: false,
+        findMatchIndex: 0,
       }
       setBuffer(prev => {
         if (prev.some(b => b.id === id)) return prev
@@ -972,6 +1565,10 @@ export default function GitReviewPage() {
         editContent: "",
         dirty: false,
         oldPath,
+        findOpen: false,
+        findQuery: "",
+        findCaseSensitive: false,
+        findMatchIndex: 0,
       }
       ensureTab(file, staged, fromAll, oldPath)
       setActiveId(id)
@@ -1145,11 +1742,12 @@ export default function GitReviewPage() {
         content = await fetchRaw(active)
       }
       updateEntry(active.id, {
-        viewMode: "split", // any future value works; raw is irrelevant while editing
+        viewMode: "split",
         editMode: true,
         editContent: content,
         dirty: false,
         mdRender: false,
+        findOpen: false,
       })
     } else {
       updateEntry(active.id, { editMode: false, editContent: "", dirty: false })
@@ -1261,6 +1859,10 @@ export default function GitReviewPage() {
         editMode: false,
         editContent: "",
         dirty: false,
+        findOpen: false,
+        findQuery: "",
+        findCaseSensitive: false,
+        findMatchIndex: 0,
       }))
       setBuffer(seeded)
       const validActive = restored.activeId && seeded.some(b => b.id === restored.activeId)
@@ -1295,11 +1897,38 @@ export default function GitReviewPage() {
   // Ctrl/Cmd+B toggles the sidebar (VS Code muscle memory).
   // Ctrl/Cmd+W closes the active tab; Ctrl/Cmd+Tab / PageUp/PageDown cycle
   // tabs. Ctrl/Cmd+S saves when the active tab is in edit mode.
+  const openFind = useCallback(() => {
+    if (!active) return
+    updateEntry(active.id, { findOpen: true, findMatchIndex: 0 })
+  }, [active, updateEntry])
+
+  const closeFind = useCallback(() => {
+    if (!active) return
+    updateEntry(active.id, { findOpen: false })
+  }, [active, updateEntry])
+
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       const mod = e.ctrlKey || e.metaKey
+      if (e.key === "Escape") {
+        if (active?.findOpen) {
+          e.preventDefault()
+          updateEntry(active.id, { findOpen: false })
+        }
+        return
+      }
       if (!mod) return
       const key = e.key.toLowerCase()
+      if (key === "f" && active && !active.editMode) {
+        e.preventDefault()
+        openFind()
+        window.setTimeout(() => {
+          const input = document.querySelector<HTMLInputElement>("[data-find-input]")
+          input?.focus()
+          input?.select()
+        }, 0)
+        return
+      }
       if (key === "b") {
         e.preventDefault()
         toggleSidebar()
@@ -1334,7 +1963,7 @@ export default function GitReviewPage() {
     }
     window.addEventListener("keydown", onKey)
     return () => window.removeEventListener("keydown", onKey)
-  }, [toggleSidebar, active, buffer, activeId, closeTab, fetchEntry])
+  }, [toggleSidebar, active, buffer, activeId, closeTab, fetchEntry, updateEntry, openFind])
 
   const changesFiles = files.filter(f => !f.staged)
   const stagedFiles = files.filter(f => f.staged)
@@ -1348,6 +1977,54 @@ export default function GitReviewPage() {
   const hasFileSearch = fileSearch.trim().length > 0
 
   const selectedFullPath = active ? (repoPath ? `${repoPath}/${active.file}` : active.file) : ""
+
+  function getSearchText(entry: BufferEntry): string {
+    if (entry.editMode) return entry.editContent
+    if (entry.fromAll) return entry.raw
+    if (isMarkdownFile(entry.file) && entry.mdRender) return entry.raw
+    if (entry.viewMode === "raw") return entry.raw
+    return entry.diff
+  }
+
+  const activeFindText = active ? getSearchText(active) : ""
+  const activeFindMatches = useMemo(
+    () => findMatches(activeFindText, active?.findQuery || "", active?.findCaseSensitive || false),
+    [activeFindText, active?.findQuery, active?.findCaseSensitive]
+  )
+  const activeFindTotal = activeFindMatches.length
+
+  const setFindQuery = useCallback(
+    (value: string) => {
+      if (!active) return
+      updateEntry(active.id, { findQuery: value, findMatchIndex: 0 })
+    },
+    [active, updateEntry]
+  )
+
+  const toggleFindCase = useCallback(() => {
+    if (!active) return
+    updateEntry(active.id, { findCaseSensitive: !active.findCaseSensitive, findMatchIndex: 0 })
+  }, [active, updateEntry])
+
+  const findNext = useCallback(() => {
+    if (!active || activeFindTotal === 0) return
+    updateEntry(active.id, { findMatchIndex: (active.findMatchIndex + 1) % activeFindTotal })
+  }, [active, activeFindTotal, updateEntry])
+
+  const findPrev = useCallback(() => {
+    if (!active || activeFindTotal === 0) return
+    updateEntry(active.id, {
+      findMatchIndex: (active.findMatchIndex - 1 + activeFindTotal) % activeFindTotal,
+    })
+  }, [active, activeFindTotal, updateEntry])
+
+  const clampFindIndex = useCallback(
+    (value: number) => {
+      if (!active) return
+      updateEntry(active.id, { findMatchIndex: value })
+    },
+    [active, updateEntry]
+  )
 
   const handleRowKeyDown = (
     e: React.KeyboardEvent<HTMLDivElement>,
@@ -1719,6 +2396,10 @@ export default function GitReviewPage() {
                       editMode: false,
                       editContent: "",
                       dirty: false,
+                      findOpen: false,
+                      findQuery: "",
+                      findCaseSensitive: false,
+                      findMatchIndex: 0,
                     }))
                     setBuffer(seeded)
                     setActiveId(
@@ -2021,6 +2702,28 @@ export default function GitReviewPage() {
                           </Button>
                         </>
                       )}
+                      {!active.editMode && (
+                        <Button
+                          variant={active.findOpen ? "default" : "outline"}
+                          size="icon"
+                          className="h-7 w-7"
+                          title="Search in file (Ctrl/Cmd+F)"
+                          onClick={() => {
+                            if (active.findOpen) {
+                              closeFind()
+                            } else {
+                              openFind()
+                              window.setTimeout(() => {
+                                const input = document.querySelector<HTMLInputElement>("[data-find-input]")
+                                input?.focus()
+                                input?.select()
+                              }, 0)
+                            }
+                          }}
+                        >
+                          <Search size={13} />
+                        </Button>
+                      )}
                       <Button
                         variant="outline"
                         size="icon"
@@ -2033,6 +2736,21 @@ export default function GitReviewPage() {
                     </div>
                   )}
                 </div>
+                {active?.findOpen && !active?.editMode && (
+                  <div className="mt-2">
+                    <FindBar
+                      query={active.findQuery}
+                      caseSensitive={active.findCaseSensitive}
+                      total={activeFindTotal}
+                      index={active.findMatchIndex}
+                      onQueryChange={setFindQuery}
+                      onCaseToggle={toggleFindCase}
+                      onPrev={findPrev}
+                      onNext={findNext}
+                      onClose={closeFind}
+                    />
+                  </div>
+                )}
                 {active && (
                   <p className="mt-1 truncate text-xs text-muted-foreground">{active.file}</p>
                 )}
@@ -2044,6 +2762,10 @@ export default function GitReviewPage() {
                     content={active.editContent}
                     file={active.file}
                     onChange={v => updateEntry(active.id, { editContent: v, dirty: v !== active.raw })}
+                    findQuery={active.findOpen ? active.findQuery : undefined}
+                    findCaseSensitive={active.findCaseSensitive}
+                    findMatchIndex={active.findOpen ? active.findMatchIndex : undefined}
+                    onMatchIndexClamp={clampFindIndex}
                   />
                 ) : (
                   <div className="diff-scroll h-full overflow-auto">
@@ -2058,30 +2780,63 @@ export default function GitReviewPage() {
                       </div>
                     ) : active.fromAll ? (
                       active.mdRender && isMarkdownFile(active.file) ? (
-                        <MarkdownView content={active.md} />
+                        <MarkdownView
+                          content={active.md}
+                          fullPath={selectedFullPath}
+                          findQuery={active.findOpen ? active.findQuery : undefined}
+                          findCaseSensitive={active.findCaseSensitive}
+                          findMatchIndex={active.findOpen ? active.findMatchIndex : undefined}
+                        />
                       ) : active.rawError ? (
                         <div className="p-4 text-sm text-destructive whitespace-pre-wrap break-words">{active.rawError}</div>
                       ) : active.raw ? (
-                        <CodeView content={active.raw} file={active.file} fullPath={selectedFullPath} />
+                        <CodeView
+                          content={active.raw}
+                          file={active.file}
+                          fullPath={selectedFullPath}
+                          findQuery={active.findOpen ? active.findQuery : undefined}
+                          findCaseSensitive={active.findCaseSensitive}
+                          findMatchIndex={active.findOpen ? active.findMatchIndex : undefined}
+                        />
                       ) : (
                         <div className="flex items-center justify-center h-32">
                           <RefreshCw size={20} className="animate-spin text-muted-foreground" />
                         </div>
                       )
                     ) : active.mdRender && isMarkdownFile(active.file) ? (
-                      <MarkdownView content={active.md} />
+                      <MarkdownView
+                        content={active.md}
+                        fullPath={selectedFullPath}
+                        findQuery={active.findOpen ? active.findQuery : undefined}
+                        findCaseSensitive={active.findCaseSensitive}
+                        findMatchIndex={active.findOpen ? active.findMatchIndex : undefined}
+                      />
                     ) : active.viewMode === "raw" ? (
                       active.rawError ? (
                         <div className="p-4 text-sm text-destructive whitespace-pre-wrap break-words">{active.rawError}</div>
                       ) : active.raw ? (
-                        <CodeView content={active.raw} file={active.file} fullPath={selectedFullPath} />
+                        <CodeView
+                          content={active.raw}
+                          file={active.file}
+                          fullPath={selectedFullPath}
+                          findQuery={active.findOpen ? active.findQuery : undefined}
+                          findCaseSensitive={active.findCaseSensitive}
+                          findMatchIndex={active.findOpen ? active.findMatchIndex : undefined}
+                        />
                       ) : (
                         <div className="flex items-center justify-center h-32">
                           <RefreshCw size={20} className="animate-spin text-muted-foreground" />
                         </div>
                       )
                     ) : active.diff ? (
-                      <DiffView raw={active.diff} view={active.viewMode === "split" ? "split" : "unified"} fullPath={selectedFullPath} />
+                      <DiffView
+                        raw={active.diff}
+                        view={active.viewMode === "split" ? "split" : "unified"}
+                        fullPath={selectedFullPath}
+                        findQuery={active.findOpen ? active.findQuery : undefined}
+                        findCaseSensitive={active.findCaseSensitive}
+                        findMatchIndex={active.findOpen ? active.findMatchIndex : undefined}
+                      />
                     ) : (
                       <div className="flex flex-col items-center justify-center h-40 text-muted-foreground">
                         <GitCommit size={24} />
