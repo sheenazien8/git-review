@@ -41,4 +41,5 @@ yarn-error.log*
 next-env.d.ts
 projects.json
 .playwright-mcp/
-todos/
+docs/plan/
+.memory/

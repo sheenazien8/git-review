@@ -18,15 +18,19 @@ export function getAuthUsername(): string {
   return process.env.BASIC_AUTH_USERNAME || "admin"
 }
 
+// Generated once per process — regenerating on every call would make the
+// logged password useless by the time anyone types it in.
+let generatedPassword: string | null = null
+
 export function getAuthPassword(): string {
   const password = process.env.BASIC_AUTH_PASSWORD || ""
-  if (!password) {
-    const generated = randomBytes(16).toString("hex")
-    console.warn(`[git-review] BASIC_AUTH_PASSWORD is not set. Temporary generated password: ${generated}`)
+  if (password) return password
+  if (!generatedPassword) {
+    generatedPassword = randomBytes(16).toString("hex")
+    console.warn(`[git-review] BASIC_AUTH_PASSWORD is not set. Temporary generated password: ${generatedPassword}`)
     console.warn(`[git-review] Set BASIC_AUTH_PASSWORD in your environment to avoid this message.`)
-    return generated
   }
-  return password
+  return generatedPassword
 }
 
 export async function signToken(payload: { username: string }): Promise<string> {

@@ -1,0 +1,139 @@
+import { useState, type ReactNode } from "react"
+import { Check, FilePlus, Folder, GitBranch, Menu, Moon, PanelLeft, RefreshCw, RotateCcw, Sun, Upload } from "lucide-react"
+import { Badge } from "@/components/ui/badge"
+import { Button } from "@/components/ui/button"
+import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip"
+import type { ActionResult } from "@/features/changes/use-git-actions"
+import { projects } from "@/features/projects/projects"
+import type { ActionName } from "@/lib/git/types"
+import { cn } from "@/lib/utils"
+
+function IconTip({ tip, children }: { tip: string; children: ReactNode }) {
+  return (
+    <Tooltip>
+      <TooltipTrigger asChild>{children}</TooltipTrigger>
+      <TooltipContent side="bottom">{tip}</TooltipContent>
+    </Tooltip>
+  )
+}
+
+const inputCls = "rounded-md border border-input bg-background text-sm text-foreground focus:outline-none focus:ring-2 focus:ring-ring"
+
+// Title bar (sidebar toggles, branch, last action result, theme, new file,
+// discard all) plus the repo selector / refresh / commit / push row.
+export function AppHeader(props: {
+  branch: string
+  error: string
+  loading: boolean
+  actionResult: ActionResult | null
+  busyAction: ActionName | null
+  isDark: boolean
+  repoPath: string
+  onToggleTheme: () => void
+  onToggleSidebar: () => void
+  onOpenMobileSidebar: () => void
+  onNewFile: () => void
+  onDiscardAll: () => void
+  onRepoChange: (repo: string) => void
+  onRefresh: () => void
+  onCommit: (message: string) => Promise<boolean>
+  onPush: () => void
+}) {
+  const { branch, error, loading, actionResult, busyAction, isDark } = props
+  const [commitMsg, setCommitMsg] = useState("")
+
+  const commit = async () => {
+    if (await props.onCommit(commitMsg)) setCommitMsg("")
+  }
+
+  return (
+    <header className="shrink-0 border-b border-border">
+      <div className="flex items-center gap-2 px-3 py-2 sm:px-4">
+        <Button variant="ghost" size="icon" className="h-8 w-8 md:hidden" title="Open file sidebar" onClick={props.onOpenMobileSidebar}>
+          <Menu size={16} />
+        </Button>
+        <Button variant="ghost" size="icon" className="hidden h-8 w-8 md:inline-flex" title="Toggle sidebar (Ctrl+B)" onClick={props.onToggleSidebar}>
+          <PanelLeft size={16} />
+        </Button>
+        <GitBranch size={18} className="text-muted-foreground" />
+        <h1 className="text-sm font-semibold sm:text-lg">Git Review</h1>
+        {branch && <Badge variant="secondary" className="text-xs">{branch}</Badge>}
+        <div className="flex-1" />
+        {actionResult && (
+          <span
+            className={cn("max-w-32 truncate text-xs sm:max-w-72", actionResult.ok ? "text-green-600 dark:text-green-400" : "text-destructive")}
+            title={actionResult.message}
+          >
+            {actionResult.message}
+          </span>
+        )}
+        <Button variant="outline" size="sm" onClick={props.onToggleTheme} className="gap-2">
+          {isDark ? <Sun size={14} /> : <Moon size={14} />}
+          <span className="hidden sm:inline">{isDark ? "Light" : "Dark"}</span>
+        </Button>
+        <IconTip tip="New File">
+          <Button variant="outline" size="icon" className="h-9 w-9" onClick={props.onNewFile}>
+            <FilePlus size={16} />
+          </Button>
+        </IconTip>
+        <IconTip tip="Discard all changes">
+          <Button
+            variant="outline"
+            size="icon"
+            className="h-9 w-9 text-destructive hover:text-destructive"
+            disabled={!!busyAction}
+            onClick={props.onDiscardAll}
+          >
+            <RotateCcw size={16} />
+          </Button>
+        </IconTip>
+      </div>
+
+      <form
+        onSubmit={e => { e.preventDefault(); props.onRefresh() }}
+        className="grid grid-cols-4 gap-2 border-t border-border px-3 py-2 sm:flex sm:flex-wrap sm:items-center sm:px-4"
+      >
+        <div className="relative col-span-3 min-w-40 flex-1 sm:max-w-xs">
+          <Folder size={14} className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-muted-foreground" />
+          <select
+            value={props.repoPath}
+            onChange={e => props.onRepoChange(e.target.value)}
+            title={props.repoPath}
+            className={cn(inputCls, "h-9 w-full cursor-pointer pl-9 pr-3 font-mono")}
+          >
+            {projects.map(p => (
+              <option key={p.dir} value={p.dir}>{p.name}</option>
+            ))}
+          </select>
+        </div>
+        <Button type="submit" size="sm" disabled={loading} className="col-span-1 gap-1.5">
+          <RefreshCw size={14} className={cn(loading && "animate-spin")} />
+          <span className="hidden sm:inline">Refresh</span>
+        </Button>
+        <input
+          value={commitMsg}
+          onChange={e => setCommitMsg(e.target.value)}
+          onKeyDown={e => {
+            if (e.key === "Enter" && commitMsg.trim() && !busyAction) commit()
+          }}
+          placeholder="Commit message…"
+          className={cn(inputCls, "col-span-2 h-9 min-w-40 flex-1 px-3 placeholder:text-muted-foreground")}
+        />
+        <Button size="sm" className="col-span-1 gap-1.5" disabled={!!busyAction || !commitMsg.trim()} onClick={commit}>
+          {busyAction === "commit" ? <RefreshCw size={14} className="animate-spin" /> : <Check size={14} />}
+          Commit
+        </Button>
+        <Button variant="outline" size="sm" className="col-span-1 gap-1.5" disabled={!!busyAction} onClick={props.onPush}>
+          {busyAction === "push" ? <RefreshCw size={14} className="animate-spin" /> : <Upload size={14} />}
+          Push
+        </Button>
+      </form>
+
+      {error && (
+        <div className="border-t border-border bg-destructive/10 px-3 py-1.5 text-sm text-destructive sm:px-4" title={error}>
+          <span className="line-clamp-1">{error}</span>
+        </div>
+      )}
+    </header>
+  )
+}

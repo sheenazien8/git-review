@@ -9,7 +9,7 @@ yarn-error.log*
 next-env.d.ts
 *.png
 .playwright-mcp
-todos
+docs
 README.md
 AGENTS.md
 CLAUDE.md
