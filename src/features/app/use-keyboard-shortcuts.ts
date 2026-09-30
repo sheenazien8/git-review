@@ -9,6 +9,7 @@ interface Shortcuts {
   openFind: () => void
   closeFind: () => void
   toggleSidebar: () => void
+  toggleAgent: () => void
   save: () => void
 }
 
@@ -16,6 +17,7 @@ interface Shortcuts {
 //   Esc               close the find bar
 //   Ctrl/Cmd+F        find in file (not while editing)
 //   Ctrl/Cmd+B        toggle the sidebar (VS Code muscle memory)
+//   Ctrl/Cmd+I        toggle the agent panel
 //   Ctrl/Cmd+S        save while editing
 //   Ctrl/Cmd+W        close the active tab
 //   Ctrl/Cmd+(Shift+)Tab, Ctrl/Cmd+PageUp/PageDown   cycle tabs
@@ -28,7 +30,7 @@ export function useKeyboardShortcuts(shortcuts: Shortcuts) {
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
-      const { active, entries, activate, requestClose, openFind, closeFind, toggleSidebar, save } = ref.current
+      const { active, entries, activate, requestClose, openFind, closeFind, toggleSidebar, toggleAgent, save } = ref.current
       if (e.key === "Escape") {
         if (active?.findOpen) {
           e.preventDefault()
@@ -44,6 +46,9 @@ export function useKeyboardShortcuts(shortcuts: Shortcuts) {
       } else if (key === "b") {
         e.preventDefault()
         toggleSidebar()
+      } else if (key === "i" && !e.shiftKey && !e.altKey) {
+        e.preventDefault()
+        toggleAgent()
       } else if (key === "s") {
         if (active?.editMode) {
           e.preventDefault()

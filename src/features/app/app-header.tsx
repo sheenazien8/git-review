@@ -1,5 +1,5 @@
 import { useState, type ReactNode } from "react"
-import { Check, FilePlus, Folder, FolderGit2, FolderMinus, FolderPlus, GitBranch, Menu, Moon, PanelLeft, RefreshCw, RotateCcw, Sun, Upload } from "lucide-react"
+import { Bot, Check, FilePlus, Folder, FolderGit2, FolderMinus, FolderPlus, GitBranch, Menu, Moon, PanelLeft, RefreshCw, RotateCcw, Sun, Upload } from "lucide-react"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip"
@@ -34,6 +34,8 @@ export function AppHeader(props: {
   worktrees: Worktree[]
   onToggleTheme: () => void
   onToggleSidebar: () => void
+  agentOpen: boolean
+  onToggleAgent: () => void
   onOpenMobileSidebar: () => void
   onNewFile: () => void
   onDiscardAll: () => void
@@ -74,6 +76,17 @@ export function AppHeader(props: {
             {actionResult.message}
           </span>
         )}
+        <IconTip tip="Agent (Ctrl+I)">
+          <Button
+            variant={props.agentOpen ? "default" : "outline"}
+            size="icon"
+            className="h-9 w-9"
+            aria-pressed={props.agentOpen}
+            onClick={props.onToggleAgent}
+          >
+            <Bot size={16} />
+          </Button>
+        </IconTip>
         <Button variant="outline" size="sm" onClick={props.onToggleTheme} className="gap-2">
           {isDark ? <Sun size={14} /> : <Moon size={14} />}
           <span className="hidden sm:inline">{isDark ? "Light" : "Dark"}</span>

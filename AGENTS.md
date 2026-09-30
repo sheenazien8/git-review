@@ -4,9 +4,9 @@
 
 ## OVERVIEW
 Project: **git-review**
-A local multi-repo Git review tool: a single-page Next.js app that runs `git` (via `child_process.execFile`, never a shell) against a repository chosen from `projects.json`. Features: staged/untracked file lists, unified/split/raw diffs, full-file content view (with syntax highlighting and optional Markdown rendering), filesystem file browser, and staging/unstaging/commit/push actions. Deployable as a Dockerized installable PWA.
+A local multi-repo Git review tool: a single-page Next.js app that runs `git` (via `child_process.execFile`, never a shell) against a repository chosen from `projects.json`. Features: staged/untracked file lists, unified/split/raw diffs, full-file content view (with syntax highlighting and optional Markdown rendering), filesystem file browser, staging/unstaging/commit/push actions, and an **agent chat panel** (ACP — Agent Client Protocol: the server spawns `claude-agent-acp` / `pi-acp` over stdio in the active repo). Deployable as a Dockerized installable PWA.
 
-Stack: Next.js **16.3.4** (App Router, Turbopack) · React **19.2.8** · TypeScript **5** · Tailwind CSS **v4** (via `@tailwindcss/postcss`) · shadcn/ui (new-york style, Radix UI primitives) · lucide-react icons · Serwist **9** (PWA service worker) · react-markdown + remark-gfm + rehype-highlight + highlight.js (content rendering) · Vitest **5** · pnpm **11.8.0** · Docker (node:22-alpine, standalone output)
+Stack: Next.js **16.3.4** (App Router, Turbopack) · React **19.2.8** · TypeScript **5** · Tailwind CSS **v4** (via `@tailwindcss/postcss`) · shadcn/ui (new-york style, Radix UI primitives) · lucide-react icons · Serwist **9** (PWA service worker) · react-markdown + remark-gfm + rehype-highlight + highlight.js (content rendering) · @agentclientprotocol/sdk (agent chat) · Vitest **5** · pnpm **11.8.0** · Docker (node:22-alpine, standalone output)
 
 <!-- BEGIN:nextjs-agent-rules -->
 
@@ -29,7 +29,8 @@ Layered: `app/` is routing only → `server/` (server-only git/fs logic) and `fe
 │   ├── sw.ts                   # Serwist service worker source
 │   └── api/
 │       ├── auth/{login,logout,me}/route.ts
-│       └── git/{status,diff,content,all-files,action,worktrees}/route.ts
+│       ├── git/{status,diff,content,all-files,action,worktrees}/route.ts
+│       └── acp/{agents,sessions,action}/route.ts, acp/events/route.ts (SSE stream)
 │                               # Each: parse params → resolveRepo() → one server/ call → JSON.
 │                               #   Wrapped in withErrors() (HttpError → status, else 500 + git stderr).
 ├── src/proxy.ts                # Next 16 "proxy" (was middleware.ts): JWT session check, 401/redirect
@@ -44,13 +45,19 @@ Layered: `app/` is routing only → `server/` (server-only git/fs logic) and `fe
 │   ├── git/actions.ts          # `actions: Record<ActionName, handler>` — one fn per POST action
 │   ├── git/worktree.ts         # list/add/remove worktrees, mainWorktreeOf() (reads .git file, no git)
 │   ├── fs/files.ts             # read/write/create/remove repo files (all path-guarded)
-│   └── fs/walk.ts              # All Files walker + ignore-pattern matching
+│   ├── fs/walk.ts              # All Files walker + ignore-pattern matching
+│   └── acp/                    # agent chat: config.ts (acp.config.json), agent-process.ts (spawn +
+│                               #   SDK ClientSideConnection), session.ts (event log, permissions),
+│                               #   registry.ts (globalThis maps, list/open/prompt/cancel/close, idle reaper)
 ├── src/lib/                    # isomorphic + pure (no "use client", no server-only)
 │   ├── git/types.ts            # API contract shared by routes and client (GitFile, RepoEntry, ActionName…)
 │   ├── git/parse-status.ts     # porcelain v1 parser (one entry per staged/unstaged side)
 │   ├── git/parse-diff.ts       # unified diff → hunks
 │   ├── git/parse-worktrees.ts  # `git worktree list --porcelain -z` parser
-│   ├── api-client.ts           # `api.*` typed fetchers — the ONLY place that calls /api/git/*
+│   ├── acp/                    # agent chat contract (types.ts), transcript.ts (event log → chat items),
+│                               #   line-diff.ts (ACP diff → unified diff), permissions.ts, mentions.ts (@file parsing/ranking),
+│                               #   agent-config.ts (settings → toolbar controls, context usage)
+│   ├── api-client.ts           # `api.*` typed fetchers — the ONLY place that calls /api/git/* and /api/acp/*
 │   ├── auth.ts                 # JWT sign/verify, cookies, credentials from env
 │   └── utils.ts                # cn()
 ├── src/features/               # client UI, one folder per feature
@@ -69,12 +76,17 @@ Layered: `app/` is routing only → `server/` (server-only git/fs logic) and `fe
 │   ├── projects/projects.ts    # client copy of projects.json + ?project=&worktree= URL sync
 │   ├── worktrees/              # worktrees.ts (pure: default path, labels), use-worktrees.ts,
 │   │                           #   worktree-dialogs.tsx (add/remove)
-│   └── theme/theme.ts          # useTheme() over the .dark class
+│   ├── theme/theme.ts          # useTheme() over the .dark class
+│   └── agent/                  # use-agent.ts (session + EventSource), agent-frame.tsx (aside/sheet +
+│                               #   useAgentPanel, drag width), agent-panel.tsx, prompt-box.tsx
+│                               #   (@-mentions, action buttons, resizable), config-bar.tsx (model/thinking/mode…),
+│                               #   session-picker.tsx + use-session-list.ts (paged popover), chat-items.tsx
 ├── src/components/ui/          # shadcn/ui (badge, button, card, dialog, input, scroll-area,
 │                               #   separator, sheet, skeleton, tabs, tooltip)
 ├── src/**/*.test.ts, test/     # Vitest; test/git-repo.ts creates throwaway git repos
 ├── projects.json               # Project list (name + dir [+ ignore]) — gitignored; imported at build time
 ├── ignore.config.json          # Global ignore patterns for all-files browser (read at runtime)
+├── acp.config.json             # Agent list for the chat (gitignored + dockerignored; see acp.config.example.json)
 ├── Dockerfile / docker-compose.yml
 └── public/                     # PWA icons (192/512/maskable/apple), generated sw.js, fonts/
 ```
@@ -95,7 +107,7 @@ Layered: `app/` is routing only → `server/` (server-only git/fs logic) and `fe
 
 Docker serves the app on **host port 3456** → container 3000 (`docker-compose.yml`).
 
-Vitest (`vitest.config.mts`, node env). Unit tests sit next to the code (`*.test.ts`); git/fs integration tests run against temp repos from `test/git-repo.ts`. `server-only` is aliased to a stub for tests. UI has no automated tests — smoke-test in `pnpm dev`.
+Vitest (`vitest.config.mts`, node env). Unit tests sit next to the code (`*.test.ts`); git/fs integration tests run against temp repos from `test/git-repo.ts`; agent-chat tests drive `test/fake-acp-agent.mjs` (a scripted ACP agent) through the real registry. `server-only` is aliased to a stub for tests. UI has no automated tests — smoke-test in `pnpm dev`.
 
 ## CODING STANDARDS
 *   **Language**: TypeScript, `strict: true`, `noEmit`, `moduleResolution: bundler`, `jsx: react-jsx`. Path alias `@/*` → `./src/*`.
@@ -124,3 +136,13 @@ Vitest (`vitest.config.mts`, node env). Unit tests sit next to the code (`*.test
 *   **React compiler lint** (`react-hooks/refs`): don't return a ref inside an object you then read during render — destructure it (see `useFullscreen` in `viewer-panel.tsx`).
 *   **PWA**: Serwist wraps `next.config.ts` (`withSerwist` from `@serwist/turbopack`); worker source is `src/app/sw.ts` (precache + `defaultCache` runtime caching, `skipWaiting`/`clientsClaim`); compiled to `public/sw.js`. `manifest.webmanifest` is served via `src/app/manifest.ts`. `output: "standalone"` is required for the slim Docker image.
 *   The `LayoutProps<"/">` type in `layout.tsx` is a Next.js 16 global type (not a local import).
+*   **Agent chat (ACP)** — plan `docs/plan/22-add-acp-agent-chat.md`:
+    *   **Security**: anyone logged in can make the agent run commands and edit files as the server user inside allowlisted repos. Exposing git-review publicly means exposing a coding agent. The agent command comes only from `acp.config.json` (`GIT_REVIEW_ACP_CONFIG` overrides the path; fallback = `claude-agent-acp`), never from a request; `cwd` is always `resolveRepo()`'d.
+    *   **Transport**: SSE (`GET /api/acp/events`, `id:` = event seq, replay from `Last-Event-ID`, `reset` when the client is new or fell behind the 20k-event buffer) + `POST /api/acp/action`. No WebSocket/custom server, so `output: "standalone"` stays. The service worker has a `NetworkOnly` rule for `/api/acp/` before `defaultCache` (whose `/api/` NetworkFirst would try to cache the endless stream).
+    *   **State lives in server memory** (`globalThis.__gitReviewAcp`): one agent process per (agent, repo/worktree), sessions with their event logs. Turns keep running after the browser leaves; permission requests wait for an answer (or auto mode). Idle processes are killed after 30 min; children are killed synchronously on `process.exit` (async cleanup never runs there). After a restart, sessions come back via `session/load` ("Resume"), which replays history.
+    *   Agent env strips `CLAUDECODE`/`NODE_OPTIONS` (claude refuses to start "nested" when git-review itself was launched from Claude Code).
+    *   **@-mentions**: `@path` stays in the prompt text; on send, mentioned paths that are real repo files go along as `files` and the server adds one ACP `resource_link` (`file://` URI, `resolveInRepo()`-checked, max 50) per file. Suggestions skip git-ignored files (`mentionableFiles()`: All Files entries with status `ignored`, i.e. neither `ls-files --cached` nor `--others --exclude-standard`). A mention ends at whitespace, so paths with spaces can't be mentioned.
+    *   **Agent settings toolbar** (model, thinking/effort, mode, …): built only from what the agent advertises — ACP `configOptions` from session/new|load|resume, kept current by `config_option_update` / `current_mode_update` and by `setSessionConfigOption` responses. The legacy `modes` list is shown only when an agent sends no config options (pi's modes duplicate its thinking levels). `AgentSession.config` holds the latest snapshot and the SSE route sends it right after a `reset`, so it survives the event buffer rolling over. Options can disappear after a change (Claude drops Effort for haiku), so controls always re-render from the latest list. Context usage comes from `usage_update`.
+    *   Auto mode is client-side (git-review answers `allow_once`, then `allow_always`), per session, default off.
+    *   **Docker**: the image installs `claude-agent-acp` (musl build), `pi` (`@earendil-works/pi-coding-agent`, pinned to the host's version) + `pi-acp`, and bash + ripgrep + fd, and ships `acp.config.example.json` as its `acp.config.json` (the host's own file is dockerignored). Compose mounts `~/.claude`, `~/.claude.json` and `~/.pi` into `/home/node` for logins, settings and sessions, and hides `~/.pi/agent/bin` behind a tmpfs (the host's glibc `fd`/`rg` can't run on alpine). The agents' tools only see the container's toolchain.
+    *   `next dev` blocks HMR/dev resources for non-`localhost` origins (e.g. `127.0.0.1`); smoke-test the UI over `localhost` or against a production build.

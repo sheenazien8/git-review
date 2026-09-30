@@ -1,0 +1,6 @@
+{
+  "agents": [
+    { "id": "claude", "name": "Claude", "command": ["claude-agent-acp"] },
+    { "id": "pi", "name": "Pi", "command": ["pi-acp"] }
+  ]
+}

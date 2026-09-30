@@ -1,4 +1,10 @@
 import type {
+  AcpAction,
+  AgentsResponse,
+  OpenSessionResponse,
+  SessionsResponse,
+} from "@/lib/acp/types"
+import type {
   ActionName,
   ActionPayload,
   ActionResponse,
@@ -9,7 +15,7 @@ import type {
   WorktreesResponse,
 } from "@/lib/git/types"
 
-// Typed wrappers around /api/git/*. Every call resolves with the success
+// Typed wrappers around /api/git/* and /api/acp/*. Every call resolves with the success
 // payload or throws an Error carrying the server's `error` message.
 
 async function request<T>(url: string, init?: RequestInit): Promise<T> {
@@ -60,5 +66,31 @@ export const api = {
 
   async action(repo: string, action: ActionName, payload?: ActionPayload) {
     return (await request<ActionResponse>("/api/git/action", json("POST", { action, repo, ...payload }))).message
+  },
+
+  acp: {
+    async agents() {
+      return (await request<AgentsResponse>("/api/acp/agents")).agents
+    },
+
+    async liveSessions(repo: string, agent: string) {
+      return (await request<SessionsResponse>(`/api/acp/sessions?${query({ repo, agent, scope: "live" })}`)).sessions
+    },
+
+    pastSessions(repo: string, agent: string, cursor?: string) {
+      return request<SessionsResponse>(`/api/acp/sessions?${query({ repo, agent, cursor })}`)
+    },
+
+    async open(repo: string, agent: string, resumeId?: string) {
+      return (await request<OpenSessionResponse>("/api/acp/sessions", json("POST", { repo, agent, resumeId }))).sessionId
+    },
+
+    async action(sessionId: string, action: AcpAction) {
+      await request("/api/acp/action", json("POST", { sessionId, ...action }))
+    },
+
+    eventsUrl(sessionId: string) {
+      return `/api/acp/events?${query({ sessionId })}`
+    },
   },
 }

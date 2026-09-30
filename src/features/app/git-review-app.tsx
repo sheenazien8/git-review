@@ -1,7 +1,10 @@
 "use client"
 
-import { useCallback, useEffect, useRef, useState } from "react"
+import { useCallback, useEffect, useMemo, useRef, useState } from "react"
 import { TooltipProvider } from "@/components/ui/tooltip"
+import { AgentFrame, useAgentPanel } from "@/features/agent/agent-frame"
+import { AgentPanel } from "@/features/agent/agent-panel"
+import { useAgent } from "@/features/agent/use-agent"
 import type { BufferEntry } from "@/features/buffer/buffer"
 import { TabBar } from "@/features/buffer/tab-bar"
 import { useBuffer } from "@/features/buffer/use-buffer"
@@ -20,6 +23,7 @@ import { ViewerPanel, type ViewerHandlers } from "@/features/viewer/viewer-panel
 import { useWorktrees } from "@/features/worktrees/use-worktrees"
 import { AddWorktreeDialog, type NewWorktree, RemoveWorktreeDialog } from "@/features/worktrees/worktree-dialogs"
 import { samePath } from "@/features/worktrees/worktrees"
+import { mentionableFiles } from "@/lib/acp/mentions"
 import type { ActionName, ActionPayload, Worktree } from "@/lib/git/types"
 import { AppHeader } from "./app-header"
 import { useKeyboardShortcuts } from "./use-keyboard-shortcuts"
@@ -97,6 +101,20 @@ export function GitReviewApp() {
   }, [status, active, buffer, openFromTree, worktrees])
 
   const { busyAction, actionResult, setActionResult, runAction } = useGitActions(repoPath, afterAction)
+
+  // --- Agent -----------------------------------------------------------------
+
+  // The agent edited files: refresh the change lists and the open tab (unless
+  // the user is editing it).
+  const agentChangedFiles = useCallback(async () => {
+    const fresh = await status.loadStatus()
+    if (fresh && active && !active.dirty && !active.editMode) void buffer.fetchEntry(active)
+  }, [status, active, buffer])
+
+  const agentPanel = useAgentPanel()
+  const repoFiles = useMemo(() => mentionableFiles(status.allFiles), [status.allFiles])
+  const changedFiles = useMemo(() => [...new Set(status.files.map(f => f.path))], [status.files])
+  const agent = useAgent(repoPath, agentPanel.visible, agentChangedFiles)
   const editing = useEditing({ repoPath, buffer, files: status.files, loadStatus: status.loadStatus, setActionResult })
 
   const requestDiscard = (files: string[], staged: boolean) =>
@@ -184,6 +202,7 @@ export function GitReviewApp() {
     openFind,
     closeFind: find.close,
     toggleSidebar: sidebar.toggle,
+    toggleAgent: agentPanel.toggle,
     save: editing.saveFile,
   })
 
@@ -244,6 +263,8 @@ export function GitReviewApp() {
           worktrees={worktrees.worktrees}
           onToggleTheme={toggleTheme}
           onToggleSidebar={sidebar.toggle}
+          agentOpen={agentPanel.visible}
+          onToggleAgent={agentPanel.toggle}
           onOpenMobileSidebar={() => sidebar.setMobileOpen(true)}
           onNewFile={() => setCreateOpen(true)}
           onDiscardAll={() => discardDialog.show({ action: "discardAll" })}
@@ -277,6 +298,23 @@ export function GitReviewApp() {
               on={viewerHandlers}
             />
           </main>
+          <AgentFrame
+            panel={agentPanel}
+            render={onNavigate => (
+              <AgentPanel
+                agent={agent}
+                repo={repoPath}
+                files={repoFiles}
+                changedFiles={changedFiles}
+                activeFile={active?.file ?? null}
+                onClose={agentPanel.close}
+                onOpenFile={file => {
+                  openFromTree(file)
+                  onNavigate()
+                }}
+              />
+            )}
+          />
         </div>
 
         <CreateFileDialog

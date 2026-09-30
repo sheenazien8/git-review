@@ -43,3 +43,4 @@ projects.json
 .playwright-mcp/
 docs/plan/
 .memory/
+acp.config.json

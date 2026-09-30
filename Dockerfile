@@ -25,9 +25,24 @@ ENV NODE_ENV=production \
     PORT=3000 \
     HOSTNAME=0.0.0.0
 RUN addgroup -S nodejs && adduser -S nextjs -G nodejs
+# Agent chat (docs/plan/22): the ACP agent runs inside this container, so its
+# shell tools only see what is installed here (git, bash, ripgrep, node).
+# Add a project's toolchain (php, go, …) here if the agent should use it.
+ARG CLAUDE_AGENT_ACP_VERSION=0.81.1
+ARG PI_CODING_AGENT_VERSION=0.87.1
+ARG PI_ACP_VERSION=0.0.33
+RUN apk add --no-cache bash ripgrep fd \
+ && npm install -g \
+      "@agentclientprotocol/claude-agent-acp@${CLAUDE_AGENT_ACP_VERSION}" \
+      "@earendil-works/pi-coding-agent@${PI_CODING_AGENT_VERSION}" \
+      "pi-acp@${PI_ACP_VERSION}" \
+ && npm cache clean --force
 COPY --from=builder /app/public ./public
 COPY --from=builder /app/.next/standalone ./
 COPY --from=builder /app/.next/static ./.next/static
+# Agents offered in the chat: both installed above. (The host's own
+# acp.config.json is dockerignored.)
+COPY --chown=node:node acp.config.example.json ./acp.config.json
 # The base image's `node` user is uid 1000, which matches the host user that
 # owns the repos mounted from /mnt/storage and /DATA — required for git to
 # write (stage/commit) into them without permission errors.
