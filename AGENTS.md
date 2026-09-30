@@ -29,7 +29,7 @@ Layered: `app/` is routing only → `server/` (server-only git/fs logic) and `fe
 │   ├── sw.ts                   # Serwist service worker source
 │   └── api/
 │       ├── auth/{login,logout,me}/route.ts
-│       └── git/{status,diff,content,all-files,action}/route.ts
+│       └── git/{status,diff,content,all-files,action,worktrees}/route.ts
 │                               # Each: parse params → resolveRepo() → one server/ call → JSON.
 │                               #   Wrapped in withErrors() (HttpError → status, else 500 + git stderr).
 ├── src/proxy.ts                # Next 16 "proxy" (was middleware.ts): JWT session check, 401/redirect
@@ -42,12 +42,14 @@ Layered: `app/` is routing only → `server/` (server-only git/fs logic) and `fe
 │   ├── git/status.ts           # getStatus(), isUntracked()
 │   ├── git/diff.ts             # getDiff(repo, { file, oldPath, side })
 │   ├── git/actions.ts          # `actions: Record<ActionName, handler>` — one fn per POST action
+│   ├── git/worktree.ts         # list/add/remove worktrees, mainWorktreeOf() (reads .git file, no git)
 │   ├── fs/files.ts             # read/write/create/remove repo files (all path-guarded)
 │   └── fs/walk.ts              # All Files walker + ignore-pattern matching
 ├── src/lib/                    # isomorphic + pure (no "use client", no server-only)
 │   ├── git/types.ts            # API contract shared by routes and client (GitFile, RepoEntry, ActionName…)
 │   ├── git/parse-status.ts     # porcelain v1 parser (one entry per staged/unstaged side)
 │   ├── git/parse-diff.ts       # unified diff → hunks
+│   ├── git/parse-worktrees.ts  # `git worktree list --porcelain -z` parser
 │   ├── api-client.ts           # `api.*` typed fetchers — the ONLY place that calls /api/git/*
 │   ├── auth.ts                 # JWT sign/verify, cookies, credentials from env
 │   └── utils.ts                # cn()
@@ -64,7 +66,9 @@ Layered: `app/` is routing only → `server/` (server-only git/fs logic) and `fe
 │   ├── find/                   # find.ts (pure engine), use-find.ts, find-bar.tsx, highlight-segments.tsx
 │   ├── files/                  # file-types.ts (binary/markdown/lang), status-display.tsx
 │   ├── clipboard/              # use-copy-range.ts (click-twice path:line range copy)
-│   ├── projects/projects.ts    # client copy of projects.json + ?project= URL sync
+│   ├── projects/projects.ts    # client copy of projects.json + ?project=&worktree= URL sync
+│   ├── worktrees/              # worktrees.ts (pure: default path, labels), use-worktrees.ts,
+│   │                           #   worktree-dialogs.tsx (add/remove)
 │   └── theme/theme.ts          # useTheme() over the .dark class
 ├── src/components/ui/          # shadcn/ui (badge, button, card, dialog, input, scroll-area,
 │                               #   separator, sheet, skeleton, tabs, tooltip)
@@ -110,10 +114,11 @@ Vitest (`vitest.config.mts`, node env). Unit tests sit next to the code (`*.test
 
 ## NOTES
 *   **This is Next.js 16** — do NOT assume training-data knowledge of its APIs; consult `node_modules/next/dist/docs/` first (see block above).
-*   **Repo allowlist**: `resolveRepo()` only accepts dirs listed in `projects.json` (403 otherwise); set `GIT_REVIEW_ALLOW_ANY_REPO=1` to lift it. A missing `repo` param falls back to the **first** project — same default as the client. There is no hardcoded repo path anymore.
+*   **Repo allowlist**: `resolveRepo()` (async) only accepts dirs listed in `projects.json` **or linked worktrees of them** (403 otherwise). A worktree is recognised by reading its `.git` file (never by running git inside an unlisted dir) and confirmed with `git worktree list` in the project dir. Set `GIT_REVIEW_ALLOW_ANY_REPO=1` to lift it. A missing `repo` param falls back to the **first** project — same default as the client. There is no hardcoded repo path anymore.
 *   **projects.json** is imported **at build time** by both `server/config.ts` and `features/projects/projects.ts` — editing it (including per-project `ignore`) needs a rebuild/restart. It is gitignored but must exist to build (Docker copies it via `COPY . .`).
 *   **Untracked-diff quirk** (`server/git/diff.ts`): untracked files are diffed via `git diff --no-index /dev/null <file>`, which exits 1 on success — passed as `okExitCodes: [1]` to `git()`. Staged diffs and unstage fall back to the empty tree / `git rm --cached` when HEAD is unborn (`isUnbornHead()`).
 *   **all-files browser** (`server/fs/walk.ts`): walks with `readdir`/`stat`, ignore patterns = global `ignore.config.json` (hardcoded fallback if missing/malformed) ∪ per-project `"ignore"`. Pattern syntax: bare name = any path segment; `*.ext` = suffix; `name*` = prefix; `a/b` = path prefix.
+*   **Worktrees**: the app tracks `projectDir` (selector, from projects.json) and `repoPath` (the worktree every API call targets). `addWorktree`/`removeWorktree` are actions; worktree commands run from the main worktree. New worktree paths must be absolute and inside the main worktree's parent dir (UI default `<parent>/<repo>-<branch-slug>`), unless `GIT_REVIEW_ALLOW_ANY_REPO=1`.
 *   **Tabs** (`features/buffer/`): persisted per repo under `git-review-tabs-<base64 repo>` (list + active id only; content is re-fetched). `useBuffer` keeps a synchronous in-flight `Set` ref so rapid clicks don't queue duplicate fetches, and re-fetches the active tab once status has loaded (rename hints need `files`).
 *   **Dark mode**: persisted in `localStorage` under key `git-review-dark`. The `.dark` class is applied **pre-hydration** by an inline script in `layout.tsx` (localStorage → falls back to `prefers-color-scheme`), so there is no theme flash. `useTheme()` (`features/theme/theme.ts`) reads it via `useSyncExternalStore` and writes `localStorage` + toggles the class. Keep the key in sync with `layout.tsx`.
 *   **React compiler lint** (`react-hooks/refs`): don't return a ref inside an object you then read during render — destructure it (see `useFullscreen` in `viewer-panel.tsx`).

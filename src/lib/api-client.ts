@@ -6,6 +6,7 @@ import type {
   ContentResponse,
   DiffResponse,
   StatusResponse,
+  WorktreesResponse,
 } from "@/lib/git/types"
 
 // Typed wrappers around /api/git/*. Every call resolves with the success
@@ -34,6 +35,10 @@ const json = (method: string, body: unknown): RequestInit => ({
 export const api = {
   status(repo: string) {
     return request<StatusResponse>(`/api/git/status?${query({ repo })}`)
+  },
+
+  worktrees(repo: string) {
+    return request<WorktreesResponse>(`/api/git/worktrees?${query({ repo })}`)
   },
 
   allFiles(repo: string) {

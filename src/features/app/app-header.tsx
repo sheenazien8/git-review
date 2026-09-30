@@ -1,11 +1,12 @@
 import { useState, type ReactNode } from "react"
-import { Check, FilePlus, Folder, GitBranch, Menu, Moon, PanelLeft, RefreshCw, RotateCcw, Sun, Upload } from "lucide-react"
+import { Check, FilePlus, Folder, FolderGit2, FolderMinus, FolderPlus, GitBranch, Menu, Moon, PanelLeft, RefreshCw, RotateCcw, Sun, Upload } from "lucide-react"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip"
 import type { ActionResult } from "@/features/changes/use-git-actions"
 import { projects } from "@/features/projects/projects"
-import type { ActionName } from "@/lib/git/types"
+import { findWorktree, worktreeLabel } from "@/features/worktrees/worktrees"
+import type { ActionName, Worktree } from "@/lib/git/types"
 import { cn } from "@/lib/utils"
 
 function IconTip({ tip, children }: { tip: string; children: ReactNode }) {
@@ -20,7 +21,7 @@ function IconTip({ tip, children }: { tip: string; children: ReactNode }) {
 const inputCls = "rounded-md border border-input bg-background text-sm text-foreground focus:outline-none focus:ring-2 focus:ring-ring"
 
 // Title bar (sidebar toggles, branch, last action result, theme, new file,
-// discard all) plus the repo selector / refresh / commit / push row.
+// discard all) plus the project + worktree selectors / refresh / commit / push row.
 export function AppHeader(props: {
   branch: string
   error: string
@@ -28,18 +29,24 @@ export function AppHeader(props: {
   actionResult: ActionResult | null
   busyAction: ActionName | null
   isDark: boolean
+  projectDir: string
   repoPath: string
+  worktrees: Worktree[]
   onToggleTheme: () => void
   onToggleSidebar: () => void
   onOpenMobileSidebar: () => void
   onNewFile: () => void
   onDiscardAll: () => void
-  onRepoChange: (repo: string) => void
+  onProjectChange: (project: string) => void
+  onWorktreeChange: (repo: string) => void
+  onAddWorktree: () => void
+  onRemoveWorktree: (worktree: Worktree) => void
   onRefresh: () => void
   onCommit: (message: string) => Promise<boolean>
   onPush: () => void
 }) {
-  const { branch, error, loading, actionResult, busyAction, isDark } = props
+  const { branch, error, loading, actionResult, busyAction, isDark, worktrees } = props
+  const activeWorktree = findWorktree(worktrees, props.repoPath)
   const [commitMsg, setCommitMsg] = useState("")
 
   const commit = async () => {
@@ -96,9 +103,9 @@ export function AppHeader(props: {
         <div className="relative col-span-3 min-w-40 flex-1 sm:max-w-xs">
           <Folder size={14} className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-muted-foreground" />
           <select
-            value={props.repoPath}
-            onChange={e => props.onRepoChange(e.target.value)}
-            title={props.repoPath}
+            value={props.projectDir}
+            onChange={e => props.onProjectChange(e.target.value)}
+            title={props.projectDir}
             className={cn(inputCls, "h-9 w-full cursor-pointer pl-9 pr-3 font-mono")}
           >
             {projects.map(p => (
@@ -110,6 +117,41 @@ export function AppHeader(props: {
           <RefreshCw size={14} className={cn(loading && "animate-spin")} />
           <span className="hidden sm:inline">Refresh</span>
         </Button>
+        {worktrees.length > 0 && (
+          <div className="col-span-4 flex gap-2 sm:min-w-64 sm:max-w-xs sm:flex-1">
+            <div className="relative min-w-0 flex-1">
+              <FolderGit2 size={14} className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-muted-foreground" />
+              <select
+                value={activeWorktree?.path ?? props.repoPath}
+                onChange={e => props.onWorktreeChange(e.target.value)}
+                title={`Worktree: ${props.repoPath}`}
+                className={cn(inputCls, "h-9 w-full cursor-pointer pl-9 pr-3 font-mono")}
+              >
+                {!activeWorktree && <option value={props.repoPath}>{props.repoPath}</option>}
+                {worktrees.map(w => (
+                  <option key={w.path} value={w.path} disabled={w.prunable || w.bare}>{worktreeLabel(w)}</option>
+                ))}
+              </select>
+            </div>
+            <IconTip tip="Add worktree">
+              <Button type="button" variant="outline" size="icon" className="h-9 w-9 shrink-0" disabled={!!busyAction} onClick={props.onAddWorktree}>
+                <FolderPlus size={16} />
+              </Button>
+            </IconTip>
+            <IconTip tip="Remove this worktree">
+              <Button
+                type="button"
+                variant="outline"
+                size="icon"
+                className="h-9 w-9 shrink-0 text-destructive hover:text-destructive"
+                disabled={!!busyAction || !activeWorktree || activeWorktree.main}
+                onClick={() => activeWorktree && props.onRemoveWorktree(activeWorktree)}
+              >
+                <FolderMinus size={16} />
+              </Button>
+            </IconTip>
+          </div>
+        )}
         <input
           value={commitMsg}
           onChange={e => setCommitMsg(e.target.value)}

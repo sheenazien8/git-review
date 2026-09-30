@@ -20,26 +20,20 @@ describe("resolveInRepo", () => {
 describe("resolveRepo", () => {
   afterEach(() => vi.unstubAllEnvs())
 
-  it("defaults to the first project", () => {
-    expect(resolveRepo(null)).toBe(projects[0].dir)
+  it("defaults to the first project", async () => {
+    expect(await resolveRepo(null)).toBe(projects[0].dir)
   })
 
-  it("accepts listed projects, including an equivalent spelling", () => {
-    expect(resolveRepo(projects[0].dir + "/")).toBe(projects[0].dir + "/")
+  it("accepts listed projects, including an equivalent spelling", async () => {
+    expect(await resolveRepo(projects[0].dir + "/")).toBe(projects[0].dir + "/")
   })
 
-  it("rejects unlisted repos with 403", () => {
-    try {
-      resolveRepo("/etc")
-      expect.unreachable()
-    } catch (e) {
-      expect(e).toBeInstanceOf(HttpError)
-      expect((e as HttpError).status).toBe(403)
-    }
+  it("rejects unlisted repos with 403", async () => {
+    await expect(resolveRepo("/etc")).rejects.toSatisfy(e => e instanceof HttpError && e.status === 403)
   })
 
-  it("allows any repo when GIT_REVIEW_ALLOW_ANY_REPO=1", () => {
+  it("allows any repo when GIT_REVIEW_ALLOW_ANY_REPO=1", async () => {
     vi.stubEnv("GIT_REVIEW_ALLOW_ANY_REPO", "1")
-    expect(resolveRepo("/etc")).toBe("/etc")
+    expect(await resolveRepo("/etc")).toBe("/etc")
   })
 })

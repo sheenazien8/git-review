@@ -11,7 +11,7 @@ function sideFromParam(staged: string | null): DiffSide {
 
 export const GET = withErrors("Failed to load diff", async req => {
   const params = req.nextUrl.searchParams
-  const repo = resolveRepo(params.get("repo"))
+  const repo = await resolveRepo(params.get("repo"))
   const file = requireParam(params.get("file"), "No file specified")
   // Source path when `file` is a rename target.
   const oldPath = params.get("oldPath") || undefined

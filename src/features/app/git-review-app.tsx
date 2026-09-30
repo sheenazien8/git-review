@@ -11,13 +11,16 @@ import { isDiscardAction, useGitActions } from "@/features/changes/use-git-actio
 import { useGitStatus } from "@/features/changes/use-git-status"
 import { focusFindInput } from "@/features/find/highlight-segments"
 import { useFind } from "@/features/find/use-find"
-import { defaultRepo, repoFromUrl, syncRepoToUrl } from "@/features/projects/projects"
+import { defaultRepo, selectionFromUrl, syncRepoToUrl } from "@/features/projects/projects"
 import { SidebarContent } from "@/features/sidebar/sidebar-content"
 import { SidebarFrame } from "@/features/sidebar/sidebar-frame"
 import { useExpandedDirs, useSidebar } from "@/features/sidebar/use-sidebar"
 import { useTheme } from "@/features/theme/theme"
 import { ViewerPanel, type ViewerHandlers } from "@/features/viewer/viewer-panel"
-import type { ActionName, ActionPayload } from "@/lib/git/types"
+import { useWorktrees } from "@/features/worktrees/use-worktrees"
+import { AddWorktreeDialog, type NewWorktree, RemoveWorktreeDialog } from "@/features/worktrees/worktree-dialogs"
+import { samePath } from "@/features/worktrees/worktrees"
+import type { ActionName, ActionPayload, Worktree } from "@/lib/git/types"
 import { AppHeader } from "./app-header"
 import { useKeyboardShortcuts } from "./use-keyboard-shortcuts"
 
@@ -25,7 +28,11 @@ export function GitReviewApp() {
   const { isDark, toggleTheme } = useTheme()
   // Seed with the first project so the client always knows the active repo,
   // keeping the copy path:line action's full path honest from first load.
+  // `projectDir` is the projects.json entry; `repoPath` is the worktree of it
+  // every git call runs in (the project dir itself unless one is picked).
+  const [projectDir, setProjectDir] = useState(defaultRepo)
   const [repoPath, setRepoPath] = useState(defaultRepo)
+  const worktrees = useWorktrees(projectDir)
   const status = useGitStatus(repoPath)
   const buffer = useBuffer(repoPath, status.loading)
   const { active } = buffer
@@ -36,6 +43,8 @@ export function GitReviewApp() {
   const [createOpen, setCreateOpen] = useState(false)
   const deleteDialog = useDialog<string>()
   const discardDialog = useDialog<DiscardRequest>()
+  const [addWorktreeOpen, setAddWorktreeOpen] = useState(false)
+  const removeWorktreeDialog = useDialog<Worktree>()
 
   // --- Opening files --------------------------------------------------------
 
@@ -60,6 +69,12 @@ export function GitReviewApp() {
 
   // Reconciles the open tabs with the repo after a successful action.
   const afterAction = useCallback(async (action: ActionName, payload?: ActionPayload) => {
+    // Worktree add/remove don't touch this worktree's files; the caller
+    // switches repos itself, which reloads status.
+    if (action === "addWorktree" || action === "removeWorktree") {
+      await worktrees.load()
+      return
+    }
     const fresh = await status.loadStatus()
     const discard = isDiscardAction(action)
     const touchesActive = !!active && (payload?.files?.includes(active.file) ?? false)
@@ -79,7 +94,7 @@ export function GitReviewApp() {
       void status.loadAllFiles()
       if (action === "create" && payload?.path) openFromTree(payload.path)
     }
-  }, [status, active, buffer, openFromTree])
+  }, [status, active, buffer, openFromTree, worktrees])
 
   const { busyAction, actionResult, setActionResult, runAction } = useGitActions(repoPath, afterAction)
   const editing = useEditing({ repoPath, buffer, files: status.files, loadStatus: status.loadStatus, setActionResult })
@@ -115,28 +130,51 @@ export function GitReviewApp() {
     focusFindInput()
   }, [find])
 
-  const switchRepo = (next: string) => {
-    if (next === repoPath) return
-    if (buffer.entries.some(b => b.dirty) && !window.confirm("Discard unsaved changes in open tabs?")) return
+  // Points the app at another worktree (of the current project by default).
+  // Resolves to false when the user kept their unsaved tabs instead.
+  const switchRepo = (next: string, project = projectDir): boolean => {
+    if (next === repoPath && project === projectDir) return true
+    if (buffer.entries.some(b => b.dirty) && !window.confirm("Discard unsaved changes in open tabs?")) return false
+    setProjectDir(project)
     setRepoPath(next)
     status.clear()
     dirs.reset()
     buffer.restore(next)
-    syncRepoToUrl(next)
+    syncRepoToUrl({ project, repo: next })
     void status.loadStatus(next)
+    return true
   }
 
-  // First load: apply ?project=<name>, restore that repo's tabs, load status.
+  const addWorktree = async (w: NewWorktree) => {
+    if (!(await runAction("addWorktree", { ...w }))) return false
+    switchRepo(w.path)
+    return true
+  }
+
+  // Step out of the worktree before it disappears.
+  const confirmRemoveWorktree = async (force: boolean) => {
+    const target = removeWorktreeDialog.value
+    const main = worktrees.worktrees.find(w => w.main)
+    if (!target || !main) return
+    if (samePath(target.path, repoPath) && !switchRepo(main.path)) return
+    removeWorktreeDialog.setOpen(false)
+    await runAction("removeWorktree", { path: target.path, force })
+  }
+
+  // First load: apply ?project=<name>&worktree=<path>, restore that repo's
+  // tabs, load status.
   const didInitialLoadRef = useRef(false)
   useEffect(() => {
     if (didInitialLoadRef.current) return
     didInitialLoadRef.current = true
-    const repo = repoFromUrl() ?? repoPath
-    // eslint-disable-next-line react-hooks/set-state-in-effect -- one-shot URL → state hydration on mount
-    if (repo !== repoPath) setRepoPath(repo)
-    buffer.restore(repo)
-    void status.loadStatus(repo)
-  }, [repoPath, buffer, status])
+    const selection = selectionFromUrl() ?? { project: projectDir, repo: repoPath }
+    /* eslint-disable react-hooks/set-state-in-effect -- one-shot URL → state hydration on mount */
+    if (selection.project !== projectDir) setProjectDir(selection.project)
+    if (selection.repo !== repoPath) setRepoPath(selection.repo)
+    /* eslint-enable react-hooks/set-state-in-effect */
+    buffer.restore(selection.repo)
+    void status.loadStatus(selection.repo)
+  }, [projectDir, repoPath, buffer, status])
 
   useKeyboardShortcuts({
     active,
@@ -201,13 +239,18 @@ export function GitReviewApp() {
           actionResult={actionResult}
           busyAction={busyAction}
           isDark={isDark}
+          projectDir={projectDir}
           repoPath={repoPath}
+          worktrees={worktrees.worktrees}
           onToggleTheme={toggleTheme}
           onToggleSidebar={sidebar.toggle}
           onOpenMobileSidebar={() => sidebar.setMobileOpen(true)}
           onNewFile={() => setCreateOpen(true)}
           onDiscardAll={() => discardDialog.show({ action: "discardAll" })}
-          onRepoChange={switchRepo}
+          onProjectChange={dir => switchRepo(dir, dir)}
+          onWorktreeChange={path => switchRepo(path)}
+          onAddWorktree={() => setAddWorktreeOpen(true)}
+          onRemoveWorktree={removeWorktreeDialog.show}
           onRefresh={() => void status.loadStatus()}
           onCommit={message => runAction("commit", { message })}
           onPush={() => void runAction("push")}
@@ -255,6 +298,21 @@ export function GitReviewApp() {
           request={discardDialog.value}
           busyAction={busyAction}
           onConfirm={confirmDiscard}
+        />
+        <AddWorktreeDialog
+          open={addWorktreeOpen}
+          onOpenChange={setAddWorktreeOpen}
+          mainDir={worktrees.worktrees.find(w => w.main)?.path ?? projectDir}
+          branches={worktrees.branches}
+          busy={busyAction === "addWorktree"}
+          onCreate={addWorktree}
+        />
+        <RemoveWorktreeDialog
+          open={removeWorktreeDialog.open}
+          onOpenChange={removeWorktreeDialog.setOpen}
+          worktree={removeWorktreeDialog.value}
+          busy={busyAction === "removeWorktree"}
+          onConfirm={confirmRemoveWorktree}
         />
       </div>
     </TooltipProvider>

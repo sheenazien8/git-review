@@ -5,6 +5,7 @@ import { HttpError } from "../http"
 import { resolveInRepo } from "../repo"
 import { git, isUnbornHead, output } from "./exec"
 import { isUntracked } from "./status"
+import { addWorktree, removeWorktree } from "./worktree"
 
 function plural(n: number, noun: string) {
   return `${n} ${noun}${n > 1 ? "s" : ""}`
@@ -116,4 +117,7 @@ export const actions: Record<ActionName, ActionHandler> = {
     await restoreOrRemove(repo, files)
     return `Discarded ${plural(files.length, "staged file")}`
   },
+
+  addWorktree,
+  removeWorktree,
 }

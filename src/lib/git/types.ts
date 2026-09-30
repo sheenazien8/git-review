@@ -16,6 +16,26 @@ export interface StatusResponse {
   branch: string
 }
 
+// One entry of `git worktree list`. The first entry is always the main worktree.
+export interface Worktree {
+  path: string
+  head: string
+  // Short branch name; absent when detached (or bare).
+  branch?: string
+  main: boolean
+  detached: boolean
+  bare: boolean
+  locked: boolean
+  // The worktree's directory is gone; git will drop it on `worktree prune`.
+  prunable: boolean
+}
+
+export interface WorktreesResponse {
+  worktrees: Worktree[]
+  // Local branch names, for the "add worktree" dialog.
+  branches: string[]
+}
+
 export type RepoEntryStatus = "tracked" | "untracked" | "ignored"
 export type RepoEntryType = "file" | "dir"
 
@@ -53,6 +73,8 @@ export const ACTION_NAMES = [
   "discard",
   "discardAll",
   "discardStaged",
+  "addWorktree",
+  "removeWorktree",
 ] as const
 
 export type ActionName = (typeof ACTION_NAMES)[number]
@@ -60,7 +82,14 @@ export type ActionName = (typeof ACTION_NAMES)[number]
 export interface ActionPayload {
   files?: string[]
   message?: string
+  // Repo-relative file path, or the absolute worktree path for add/removeWorktree.
   path?: string
+  // addWorktree: branch to check out, creating it from `base` when `newBranch`.
+  branch?: string
+  newBranch?: boolean
+  base?: string
+  // removeWorktree: remove even with uncommitted changes.
+  force?: boolean
 }
 
 export interface ActionRequest extends ActionPayload {
