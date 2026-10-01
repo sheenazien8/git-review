@@ -36,8 +36,8 @@ interface Registry {
 
 // Lives on globalThis so dev HMR (which re-evaluates modules) doesn't lose
 // track of running agent processes.
-const g = globalThis as typeof globalThis & { __gitReviewAcp?: Registry }
-const registry: Registry = (g.__gitReviewAcp ??= { processes: new Map(), sessions: new Map() })
+const g = globalThis as typeof globalThis & { __hunkAcp?: Registry }
+const registry: Registry = (g.__hunkAcp ??= { processes: new Map(), sessions: new Map() })
 registry.pastLists ??= new Map()
 const pastLists = registry.pastLists
 

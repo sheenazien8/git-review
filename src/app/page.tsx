@@ -1,5 +1,5 @@
-import { GitReviewApp } from "@/features/app/git-review-app"
+import { HunkApp } from "@/features/app/hunk-app"
 
 export default function Page() {
-  return <GitReviewApp />
+  return <HunkApp />
 }

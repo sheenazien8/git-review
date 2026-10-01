@@ -32,8 +32,8 @@ describe("resolveRepo", () => {
     await expect(resolveRepo("/etc")).rejects.toSatisfy(e => e instanceof HttpError && e.status === 403)
   })
 
-  it("allows any repo when GIT_REVIEW_ALLOW_ANY_REPO=1", async () => {
-    vi.stubEnv("GIT_REVIEW_ALLOW_ANY_REPO", "1")
+  it("allows any repo when HUNK_ALLOW_ANY_REPO=1", async () => {
+    vi.stubEnv("HUNK_ALLOW_ANY_REPO", "1")
     expect(await resolveRepo("/etc")).toBe("/etc")
   })
 })

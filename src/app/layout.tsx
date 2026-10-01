@@ -13,13 +13,13 @@ const geistMono = Geist_Mono({
 })
 
 export const metadata: Metadata = {
-  title: "Git Review",
+  title: "Hunk",
   description: "Git diff viewer for reviewing code changes",
   manifest: "/manifest.webmanifest",
   appleWebApp: {
     capable: true,
     statusBarStyle: "black-translucent",
-    title: "Git Review",
+    title: "Hunk",
   },
   icons: {
     apple: "/apple-touch-icon.png",
@@ -33,7 +33,15 @@ export const metadata: Metadata = {
 const themeScript = `
 ;(function () {
   try {
-    var stored = localStorage.getItem("git-review-dark")
+    // One-time move of pre-rebrand "git-review-*" keys (theme, tabs, sidebar, agent).
+    for (var i = localStorage.length - 1; i >= 0; i--) {
+      var key = localStorage.key(i)
+      if (!key || key.indexOf("git-review-") !== 0) continue
+      var next = "hunk-" + key.slice("git-review-".length)
+      if (localStorage.getItem(next) === null) localStorage.setItem(next, localStorage.getItem(key))
+      localStorage.removeItem(key)
+    }
+    var stored = localStorage.getItem("hunk-dark")
     var dark = stored !== null ? stored === "true" : window.matchMedia("(prefers-color-scheme: dark)").matches
     if (dark) document.documentElement.classList.add("dark")
   } catch (e) {}

@@ -4,8 +4,8 @@ import { ancestorDirs } from "./tree"
 const SIDEBAR_MIN_WIDTH = 200
 const SIDEBAR_MAX_WIDTH = 400
 const SIDEBAR_DEFAULT_WIDTH = 280
-const SIDEBAR_WIDTH_KEY = "git-review-sidebar-width"
-const SIDEBAR_OPEN_KEY = "git-review-sidebar-open"
+const SIDEBAR_WIDTH_KEY = "hunk-sidebar-width"
+const SIDEBAR_OPEN_KEY = "hunk-sidebar-open"
 
 export function clampSidebarWidth(w: number) {
   return Math.min(SIDEBAR_MAX_WIDTH, Math.max(SIDEBAR_MIN_WIDTH, Math.round(w)))

@@ -2,8 +2,8 @@ import type { MetadataRoute } from "next"
 
 export default function manifest(): MetadataRoute.Manifest {
   return {
-    name: "Git Review",
-    short_name: "Git Review",
+    name: "Hunk",
+    short_name: "Hunk",
     description: "Git diff viewer for reviewing code changes",
     start_url: "/",
     display: "standalone",

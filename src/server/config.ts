@@ -25,7 +25,8 @@ export function findProject(repo: string): Project | undefined {
 
 // Escape hatch for opening repos that aren't listed in projects.json.
 export function allowAnyRepo(): boolean {
-  return process.env.GIT_REVIEW_ALLOW_ANY_REPO === "1"
+  // GIT_REVIEW_* is the pre-rebrand name, still honoured.
+  return (process.env.HUNK_ALLOW_ANY_REPO ?? process.env.GIT_REVIEW_ALLOW_ANY_REPO) === "1"
 }
 
 // Global defaults used when ignore.config.json is missing or malformed.

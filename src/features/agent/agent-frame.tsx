@@ -2,8 +2,8 @@ import { useCallback, useEffect, useRef, useState, useSyncExternalStore, type Re
 import { Sheet, SheetContent, SheetDescription, SheetTitle } from "@/components/ui/sheet"
 import { cn } from "@/lib/utils"
 
-const OPEN_KEY = "git-review-agent-open"
-const WIDTH_KEY = "git-review-agent-width"
+const OPEN_KEY = "hunk-agent-open"
+const WIDTH_KEY = "hunk-agent-width"
 const DESKTOP_QUERY = "(min-width: 768px)"
 const MIN_WIDTH = 320
 const MAX_WIDTH = 1200

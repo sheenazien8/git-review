@@ -34,7 +34,7 @@ export async function switchBranch(repo: string, payload: ActionPayload): Promis
     if (!payload.stash) {
       throw new HttpError(409, "You have uncommitted changes — commit or stash them before switching branches")
     }
-    await git(repo, ["stash", "push", "-m", `git-review: before switching to ${branch}`])
+    await git(repo, ["stash", "push", "-m", `hunk: before switching to ${branch}`])
     stashed = true
   }
 

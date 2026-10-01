@@ -1,0 +1,26 @@
+# hunk on the host (instead of Docker), so the agent chat can use the
+# host toolchain (go, lerd php/composer, …). Installed by scripts/deploy-host.sh
+# as a systemd *user* unit; %h = $HOME.
+[Unit]
+Description=hunk
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/mnt/storage/Documents/expose/git-review/.next/standalone
+ExecStart=%h/.nvm/versions/node/v24.19.0/bin/node server.js
+Restart=on-failure
+RestartSec=3
+EnvironmentFile=/mnt/storage/Documents/expose/git-review/.env.local
+Environment=NODE_ENV=production
+Environment=NEXT_TELEMETRY_DISABLED=1
+Environment=PORT=3456
+Environment=HOSTNAME=0.0.0.0
+# What the agents (and their shell tools) can run. systemd doesn't read your
+# shell rc, so aliases (php → lerd php) don't apply; lerd's bin has real shims.
+# nvm's node comes before lerd's bundled node.
+Environment=PATH=%h/.nvm/versions/node/v24.19.0/bin:%h/.npm-global/bin:%h/go-sdk/go/bin:%h/go/bin:%h/.local/share/lerd/bin:%h/.local/bin:/usr/local/bin:/usr/bin:/bin
+
+[Install]
+WantedBy=default.target

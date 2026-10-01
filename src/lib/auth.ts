@@ -2,7 +2,7 @@ import { SignJWT, jwtVerify } from "jose"
 import { NextRequest } from "next/server"
 import { randomBytes } from "crypto"
 
-const COOKIE_NAME = "git-review-session"
+const COOKIE_NAME = "hunk-session"
 
 function getSecret(): Uint8Array {
   const raw = process.env.AUTH_SECRET
@@ -27,8 +27,8 @@ export function getAuthPassword(): string {
   if (password) return password
   if (!generatedPassword) {
     generatedPassword = randomBytes(16).toString("hex")
-    console.warn(`[git-review] BASIC_AUTH_PASSWORD is not set. Temporary generated password: ${generatedPassword}`)
-    console.warn(`[git-review] Set BASIC_AUTH_PASSWORD in your environment to avoid this message.`)
+    console.warn(`[hunk] BASIC_AUTH_PASSWORD is not set. Temporary generated password: ${generatedPassword}`)
+    console.warn(`[hunk] Set BASIC_AUTH_PASSWORD in your environment to avoid this message.`)
   }
   return generatedPassword
 }

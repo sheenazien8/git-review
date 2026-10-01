@@ -26,7 +26,8 @@ function isAgentConfig(value: unknown): value is AgentConfig {
 }
 
 export function configPath(): string {
-  return process.env.GIT_REVIEW_ACP_CONFIG || path.join(process.cwd(), "acp.config.json")
+  // GIT_REVIEW_ACP_CONFIG is the pre-rebrand name, still honoured.
+  return process.env.HUNK_ACP_CONFIG || process.env.GIT_REVIEW_ACP_CONFIG || path.join(process.cwd(), "acp.config.json")
 }
 
 // Agents from acp.config.json (read on every call, like ignore.config.json),

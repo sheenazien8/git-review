@@ -3,7 +3,7 @@
 **Generated:** 2026-02-19 (updated 2026-09-28 after the architecture refactor — see `docs/plan/20-refactor-architecture.md`)
 
 ## OVERVIEW
-Project: **git-review**
+Project: **Hunk** (`hunk`; formerly git-review — the repo folder keeps that name)
 A local multi-repo Git review tool: a single-page Next.js app that runs `git` (via `child_process.execFile`, never a shell) against a repository chosen from `projects.json`. Features: staged/untracked file lists, unified/split/raw diffs, full-file content view (with syntax highlighting and optional Markdown rendering), filesystem file browser, staging/unstaging/commit/push actions, blame, commit history + commit detail tabs, branch switching/creation/deletion, stash, merge-conflict resolution, and an **agent chat panel** (ACP — Agent Client Protocol: the server spawns `claude-agent-acp` / `pi-acp` over stdio in the active repo). Deployable as a Dockerized installable PWA.
 
 Stack: Next.js **16.3.4** (App Router, Turbopack) · React **19.2.8** · TypeScript **5** · Tailwind CSS **v4** (via `@tailwindcss/postcss`) · shadcn/ui (new-york style, Radix UI primitives) · lucide-react icons · Serwist **9** (PWA service worker) · react-markdown + remark-gfm + rehype-highlight + highlight.js (content rendering) · @agentclientprotocol/sdk (agent chat) · Vitest **5** · pnpm **11.8.0** · Docker (node:22-alpine, standalone output)
@@ -23,7 +23,7 @@ Layered: `app/` is routing only → `server/` (server-only git/fs logic) and `fe
 ```
 ├── src/app/                    # ROUTING ONLY — keep thin
 │   ├── layout.tsx              # Root layout: Geist fonts, PWA metadata, pre-hydration dark-mode script
-│   ├── page.tsx                # Server component; just renders <GitReviewApp />
+│   ├── page.tsx                # Server component; just renders <HunkApp />
 │   ├── login/page.tsx          # Login form
 │   ├── manifest.ts             # MetadataRoute.Manifest → /manifest.webmanifest (only source — no public/ copy)
 │   ├── sw.ts                   # Serwist service worker source
@@ -37,7 +37,7 @@ Layered: `app/` is routing only → `server/` (server-only git/fs logic) and `fe
 ├── src/proxy.ts                # Next 16 "proxy" (was middleware.ts): JWT session check, 401/redirect
 ├── src/server/                 # `import "server-only"` in every module
 │   ├── config.ts               # projects.json (build-time import), defaultRepo(), findProject(),
-│   │                           #   GIT_REVIEW_ALLOW_ANY_REPO, loadIgnorePatterns()
+│   │                           #   HUNK_ALLOW_ANY_REPO, loadIgnorePatterns()
 │   ├── repo.ts                 # resolveRepo() allowlist (403) + resolveInRepo() path-escape guard (400)
 │   ├── http.ts                 # HttpError, withErrors(), readJson(), requireParam(), errorMessage()
 │   ├── git/exec.ts             # git(repo, args, {okExitCodes}) via execFile; isUnbornHead, EMPTY_TREE
@@ -70,7 +70,7 @@ Layered: `app/` is routing only → `server/` (server-only git/fs logic) and `fe
 │   ├── auth.ts                 # JWT sign/verify, cookies, credentials from env
 │   └── utils.ts                # cn()
 ├── src/features/               # client UI, one folder per feature
-│   ├── app/                    # git-review-app.tsx ("use client" boundary + orchestration),
+│   ├── app/                    # hunk-app.tsx ("use client" boundary + orchestration),
 │   │                           #   app-header.tsx, use-keyboard-shortcuts.ts
 │   ├── buffer/                 # open tabs: buffer.ts (pure reducer + persistence), use-buffer.ts
 │   │                           #   (fetching, in-flight guard), use-editing.ts, tab-bar.tsx
@@ -123,6 +123,8 @@ Layered: `app/` is routing only → `server/` (server-only git/fs logic) and `fe
 
 Docker serves the app on **host port 3456** → container 3000 (`docker-compose.yml`).
 
+**Host deploy** (alternative to Docker, so the agent chat sees the host toolchain — go, lerd php/composer, …): `scripts/deploy-host.sh` builds, copies static assets into `.next/standalone`, symlinks `acp.config.json`/`ignore.config.json` there, and (re)starts the systemd user unit `deploy/hunk.service` (port 3456, env from `.env.local`, explicit `PATH`). Don't run both — they share port 3456. Don't use `next start` (doesn't support `output: "standalone"`). pi-acp stores absolute session paths, so sessions created in Docker point at `/home/node/.pi/…`; rewrite them in `~/.pi/pi-acp/session-map.json` when switching.
+
 Vitest (`vitest.config.mts`, node env). Unit tests sit next to the code (`*.test.ts`); git/fs integration tests run against temp repos from `test/git-repo.ts`; agent-chat tests drive `test/fake-acp-agent.mjs` (a scripted ACP agent) through the real registry. `server-only` is aliased to a stub for tests. UI has no automated tests — smoke-test in `pnpm dev`.
 
 ## CODING STANDARDS
@@ -132,7 +134,7 @@ Vitest (`vitest.config.mts`, node env). Unit tests sit next to the code (`*.test
 *   **Styling**: Tailwind v4 utility classes; dark mode is **token-driven**: theme tokens are CSS variables in `globals.css` mapped via `@theme inline` (`bg-card`, `text-foreground`, `border-border`, `bg-primary`, …) plus `dark:` variants (`@custom-variant dark` on the `.dark` class) for semantic one-off colors (diff add/remove backgrounds). **Never** hardcode theme colors (`bg-white`, `bg-neutral-900`, `hover:bg-neutral-100`) and never compose class names with template interpolation — Tailwind JIT only sees complete literals.
 *   **shadcn/ui**: new-york style, RSC on, CSS-variables theming. Add components with the shadcn CLI; they land in `src/components/ui/`.
 *   **API routes / git**: always go through `git()` in `server/git/exec.ts` (argument array, `--` before paths). Never use `exec` or build shell strings. Every route resolves the repo with `resolveRepo()` and every repo-relative path with `resolveInRepo()`. Throw `HttpError` for 4xx; let `withErrors` handle the rest. Add request/response types to `lib/git/types.ts` and a wrapper to `lib/api-client.ts`.
-*   **Boundaries**: `features/` must never import `server/` (enforced by `server-only`). `lib/` stays pure. Only `features/app/git-review-app.tsx` carries `"use client"`.
+*   **Boundaries**: `features/` must never import `server/` (enforced by `server-only`). `lib/` stays pure. Only `features/app/hunk-app.tsx` carries `"use client"`.
 
 ## WHERE TO LOOK
 *   **Source**: `src/server/` (backend), `src/features/` (UI), `src/lib/` (shared contract + parsers), `src/app/` (routes)
@@ -141,13 +143,14 @@ Vitest (`vitest.config.mts`, node env). Unit tests sit next to the code (`*.test
 *   **Other context files**: `CLAUDE.md` → references `@AGENTS.md` (this file)
 
 ## NOTES
+*   **Rebrand (git-review → Hunk)**: legacy names still work — `GIT_REVIEW_ALLOW_ANY_REPO` / `GIT_REVIEW_ACP_CONFIG` are read as fallbacks for the `HUNK_*` env vars, and the pre-hydration script in `layout.tsx` moves old `git-review-*` localStorage keys to `hunk-*` once. The session cookie was renamed (`hunk-session`), so everyone logs in again once.
 *   **This is Next.js 16** — do NOT assume training-data knowledge of its APIs; consult `node_modules/next/dist/docs/` first (see block above).
-*   **Repo allowlist**: `resolveRepo()` (async) only accepts dirs listed in `projects.json` **or linked worktrees of them** (403 otherwise). A worktree is recognised by reading its `.git` file (never by running git inside an unlisted dir) and confirmed with `git worktree list` in the project dir. Set `GIT_REVIEW_ALLOW_ANY_REPO=1` to lift it. A missing `repo` param falls back to the **first** project — same default as the client. There is no hardcoded repo path anymore.
+*   **Repo allowlist**: `resolveRepo()` (async) only accepts dirs listed in `projects.json` **or linked worktrees of them** (403 otherwise). A worktree is recognised by reading its `.git` file (never by running git inside an unlisted dir) and confirmed with `git worktree list` in the project dir. Set `HUNK_ALLOW_ANY_REPO=1` to lift it. A missing `repo` param falls back to the **first** project — same default as the client. There is no hardcoded repo path anymore.
 *   **projects.json** is imported **at build time** by both `server/config.ts` and `features/projects/projects.ts` — editing it (including per-project `ignore`) needs a rebuild/restart. It is gitignored but must exist to build (Docker copies it via `COPY . .`).
 *   **Untracked-diff quirk** (`server/git/diff.ts`): untracked files are diffed via `git diff --no-index /dev/null <file>`, which exits 1 on success — passed as `okExitCodes: [1]` to `git()`. Staged diffs and unstage fall back to the empty tree / `git rm --cached` when HEAD is unborn (`isUnbornHead()`).
 *   **all-files browser** (`server/fs/walk.ts`): walks with `readdir`/`stat`, ignore patterns = global `ignore.config.json` (hardcoded fallback if missing/malformed) ∪ per-project `"ignore"`. Pattern syntax: bare name = any path segment; `*.ext` = suffix; `name*` = prefix; `a/b` = path prefix.
-*   **Worktrees**: the app tracks `projectDir` (selector, from projects.json) and `repoPath` (the worktree every API call targets). `addWorktree`/`removeWorktree` are actions; worktree commands run from the main worktree. New worktree paths must be absolute and inside the main worktree's parent dir (UI default `<parent>/<repo>-<branch-slug>`), unless `GIT_REVIEW_ALLOW_ANY_REPO=1`.
-*   **Tabs** (`features/buffer/`): persisted per repo under `git-review-tabs-<base64 repo>` (list + active id only; content is re-fetched). `useBuffer` keeps a synchronous in-flight `Set` ref so rapid clicks don't queue duplicate fetches, and re-fetches the active tab once status has loaded (rename hints need `files`).
+*   **Worktrees**: the app tracks `projectDir` (selector, from projects.json) and `repoPath` (the worktree every API call targets). `addWorktree`/`removeWorktree` are actions; worktree commands run from the main worktree. New worktree paths must be absolute and inside the main worktree's parent dir (UI default `<parent>/<repo>-<branch-slug>`), unless `HUNK_ALLOW_ANY_REPO=1`.
+*   **Tabs** (`features/buffer/`): persisted per repo under `hunk-tabs-<base64 repo>` (list + active id only; content is re-fetched). `useBuffer` keeps a synchronous in-flight `Set` ref so rapid clicks don't queue duplicate fetches, and re-fetches the active tab once status has loaded (rename hints need `files`).
 *   **Advanced git** — plan `docs/plan/23-advanced-git-features.md`:
     *   **Blame** is a view mode (`viewMode: "blame"`, available on every file tab); click a sha to open that commit.
     *   **Commit tabs**: buffer entries with `commit` set (`file` is ""), id `<repo>::commit::<sha>`. Opened from History, blame, stash ("show changes") and parent links. Diffs are against the **first parent** (stash commits therefore show the stashed tracked changes; untracked files in a stash aren't shown). Find is disabled there.
@@ -156,17 +159,17 @@ Vitest (`vitest.config.mts`, node env). Unit tests sit next to the code (`*.test
     *   **switchBranch** refuses (409) with tracked changes unless `stash: true`; the UI asks first ("Stash & Switch"). Remote branches ("origin/x") switch via `switch --track`, or to the existing local branch of the same name.
     *   **Conflicts**: porcelain unmerged codes (UU/AA/DU/…) → one `status: "conflicted"`, unstaged entry. Their diff is a combined diff, so `fetchEntry` also loads raw content and the viewer shows the conflict view (current | incoming panes, base in diff3 style). Resolutions live in `editContent`/`dirty` (like edit mode) until Save; "Mark resolved" = `add`.
 *   **Quick Open** (`features/quick-open/`, plan `docs/plan/25-quick-open-file-picker.md`): Ctrl/Cmd+P (also the header search button) fuzzy-finds over `repoFiles` (All Files minus git-ignored) ∪ changed files; empty query = open tabs then changed files. It's separate from the sidebar search input, which stays a tree/History filter. While it's open the global shortcut handler ignores keys. `path:42` opens the file raw (All Files tab) with `BufferEntry.gotoLine`, which `NumberedCode` scrolls to/highlights (CodeView only).
-*   **Dark mode**: persisted in `localStorage` under key `git-review-dark`. The `.dark` class is applied **pre-hydration** by an inline script in `layout.tsx` (localStorage → falls back to `prefers-color-scheme`), so there is no theme flash. `useTheme()` (`features/theme/theme.ts`) reads it via `useSyncExternalStore` and writes `localStorage` + toggles the class. Keep the key in sync with `layout.tsx`.
+*   **Dark mode**: persisted in `localStorage` under key `hunk-dark`. The `.dark` class is applied **pre-hydration** by an inline script in `layout.tsx` (localStorage → falls back to `prefers-color-scheme`), so there is no theme flash. `useTheme()` (`features/theme/theme.ts`) reads it via `useSyncExternalStore` and writes `localStorage` + toggles the class. Keep the key in sync with `layout.tsx`.
 *   **React compiler lint** (`react-hooks/refs`): don't return a ref inside an object you then read during render — destructure it (see `useFullscreen` in `viewer-panel.tsx`).
 *   **PWA**: Serwist wraps `next.config.ts` (`withSerwist` from `@serwist/turbopack`); worker source is `src/app/sw.ts` (precache + `defaultCache` runtime caching, `skipWaiting`/`clientsClaim`); compiled to `public/sw.js`. `manifest.webmanifest` is served via `src/app/manifest.ts`. `output: "standalone"` is required for the slim Docker image.
 *   The `LayoutProps<"/">` type in `layout.tsx` is a Next.js 16 global type (not a local import).
 *   **Agent chat (ACP)** — plan `docs/plan/22-add-acp-agent-chat.md`:
-    *   **Security**: anyone logged in can make the agent run commands and edit files as the server user inside allowlisted repos. Exposing git-review publicly means exposing a coding agent. The agent command comes only from `acp.config.json` (`GIT_REVIEW_ACP_CONFIG` overrides the path; fallback = `claude-agent-acp`), never from a request; `cwd` is always `resolveRepo()`'d.
+    *   **Security**: anyone logged in can make the agent run commands and edit files as the server user inside allowlisted repos. Exposing Hunk publicly means exposing a coding agent. The agent command comes only from `acp.config.json` (`HUNK_ACP_CONFIG` overrides the path; fallback = `claude-agent-acp`), never from a request; `cwd` is always `resolveRepo()`'d.
     *   **Transport**: SSE (`GET /api/acp/events`, `id:` = event seq, replay from `Last-Event-ID`, `reset` when the client is new or fell behind the 20k-event buffer) + `POST /api/acp/action`. No WebSocket/custom server, so `output: "standalone"` stays. The service worker has a `NetworkOnly` rule for `/api/acp/` before `defaultCache` (whose `/api/` NetworkFirst would try to cache the endless stream).
-    *   **State lives in server memory** (`globalThis.__gitReviewAcp`): one agent process per (agent, repo/worktree), sessions with their event logs. Turns keep running after the browser leaves; permission requests wait for an answer (or auto mode). Idle processes are killed after 30 min; children are killed synchronously on `process.exit` (async cleanup never runs there). After a restart, sessions come back via `session/load` ("Resume"), which replays history.
-    *   Agent env strips `CLAUDECODE`/`NODE_OPTIONS` (claude refuses to start "nested" when git-review itself was launched from Claude Code).
+    *   **State lives in server memory** (`globalThis.__hunkAcp`): one agent process per (agent, repo/worktree), sessions with their event logs. Turns keep running after the browser leaves; permission requests wait for an answer (or auto mode). Idle processes are killed after 30 min; children are killed synchronously on `process.exit` (async cleanup never runs there). After a restart, sessions come back via `session/load` ("Resume"), which replays history.
+    *   Agent env strips `CLAUDECODE`/`NODE_OPTIONS` (claude refuses to start "nested" when Hunk itself was launched from Claude Code).
     *   **@-mentions**: `@path` stays in the prompt text; on send, mentioned paths that are real repo files go along as `files` and the server adds one ACP `resource_link` (`file://` URI, `resolveInRepo()`-checked, max 50) per file. Suggestions skip git-ignored files (`mentionableFiles()`: All Files entries with status `ignored`, i.e. neither `ls-files --cached` nor `--others --exclude-standard`). A mention ends at whitespace, so paths with spaces can't be mentioned.
     *   **Agent settings toolbar** (model, thinking/effort, mode, …): built only from what the agent advertises — ACP `configOptions` from session/new|load|resume, kept current by `config_option_update` / `current_mode_update` and by `setSessionConfigOption` responses. The legacy `modes` list is shown only when an agent sends no config options (pi's modes duplicate its thinking levels). `AgentSession.config` holds the latest snapshot and the SSE route sends it right after a `reset`, so it survives the event buffer rolling over. Options can disappear after a change (Claude drops Effort for haiku), so controls always re-render from the latest list. Context usage comes from `usage_update`.
-    *   Auto mode is client-side (git-review answers `allow_once`, then `allow_always`), per session, default off.
+    *   Auto mode is client-side (Hunk answers `allow_once`, then `allow_always`), per session, default off.
     *   **Docker**: the image installs `claude-agent-acp` (musl build), `pi` (`@earendil-works/pi-coding-agent`, pinned to the host's version) + `pi-acp`, and bash + ripgrep + fd, and ships `acp.config.example.json` as its `acp.config.json` (the host's own file is dockerignored). Compose mounts `~/.claude`, `~/.claude.json` and `~/.pi` into `/home/node` for logins, settings and sessions, and hides `~/.pi/agent/bin` behind a tmpfs (the host's glibc `fd`/`rg` can't run on alpine). The agents' tools only see the container's toolchain.
     *   `next dev` blocks HMR/dev resources for non-`localhost` origins (e.g. `127.0.0.1`); smoke-test the UI over `localhost` or against a production build.

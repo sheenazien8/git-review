@@ -5,7 +5,7 @@ import type { BlameResponse, CommitResponse } from "@/lib/git/types"
 // tab, for one commit.
 
 export const TAB_CAP = 20
-const TABS_STORAGE_PREFIX = "git-review-tabs-"
+const TABS_STORAGE_PREFIX = "hunk-tabs-"
 
 export type ViewMode = "unified" | "split" | "raw" | "blame"
 

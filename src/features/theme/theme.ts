@@ -1,7 +1,7 @@
 import { useCallback, useSyncExternalStore } from "react"
 
 // Must match the pre-hydration script in app/layout.tsx.
-const THEME_STORAGE_KEY = "git-review-dark"
+const THEME_STORAGE_KEY = "hunk-dark"
 
 // The .dark class on <html> is the source of truth for the theme. It is
 // applied pre-hydration by the inline script in layout.tsx (localStorage,

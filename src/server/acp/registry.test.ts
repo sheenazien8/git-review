@@ -11,10 +11,10 @@ const fakeAgent = path.resolve(__dirname, "../../../test/fake-acp-agent.mjs")
 let tmp: string
 
 beforeAll(() => {
-  tmp = mkdtempSync(path.join(os.tmpdir(), "git-review-acp-"))
+  tmp = mkdtempSync(path.join(os.tmpdir(), "hunk-acp-"))
   const config = path.join(tmp, "acp.config.json")
   writeFileSync(config, JSON.stringify({ agents: [{ id: "fake", name: "Fake", command: [process.execPath, fakeAgent] }] }))
-  process.env.GIT_REVIEW_ACP_CONFIG = config
+  process.env.HUNK_ACP_CONFIG = config
 })
 
 afterAll(async () => {

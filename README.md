@@ -1,4 +1,4 @@
-# Git Review
+# Hunk
 
 A local web UI for reviewing and acting on changes across your Git repositories. Pick a project, browse staged, unstaged, and untracked changes, read diffs (split/unified/raw), inspect full file contents with syntax highlighting or Markdown rendering, and stage, unstage, commit, or push — all from one page.
 

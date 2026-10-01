@@ -3,14 +3,28 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
-    image: git-review
-    container_name: git-review
+    image: hunk
+    container_name: hunk
     restart: unless-stopped
     ports:
       - "3456:3000"
     env_file: .env.local
     environment:
       - NODE_ENV=production
+      - OLLAMA_API_KEY
+      - OLLAMA_ANTIKODDE_API_KEY
+      - FADLI_API_KEY
+      - SHEENA_9_ROUTER_KEY
     volumes:
       - /mnt/storage:/mnt/storage
       - /DATA:/DATA
+      # Agent chat: reuse the host's Claude Code login (read-write, so OAuth
+      # tokens can refresh). Or set ANTHROPIC_API_KEY in .env.local instead.
+      - ${HOME}/.claude:/home/node/.claude
+      - ${HOME}/.claude.json:/home/node/.claude.json
+      # pi (pi-acp): settings, auth, extensions and sessions from the host.
+      - ${HOME}/.pi:/home/node/.pi
+    tmpfs:
+      # pi runs ~/.pi/agent/bin/{fd,rg} before the system ones; the host's are
+      # glibc builds that can't run on alpine, so hide them (the image has fd + rg).
+      - /home/node/.pi/agent/bin:uid=1000,gid=1000

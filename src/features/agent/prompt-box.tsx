@@ -6,7 +6,7 @@ import { cn } from "@/lib/utils"
 import { ConfigBar } from "./config-bar"
 import type { Agent } from "./use-agent"
 
-const PROMPT_HEIGHT_KEY = "git-review-agent-prompt-height"
+const PROMPT_HEIGHT_KEY = "hunk-agent-prompt-height"
 const PROMPT_ROWS = 5
 const PROMPT_MIN_HEIGHT = 56
 // Never let the prompt box take more than this share of the viewport.

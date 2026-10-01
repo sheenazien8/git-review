@@ -15,5 +15,5 @@ AGENTS.md
 CLAUDE.md
 Dockerfile
 docker-compose.yml# Host-specific agent list; the image ships acp.config.example.json (Claude + Pi,
-# both installed there) instead. Mount one + GIT_REVIEW_ACP_CONFIG to override.
+# both installed there) instead. Mount one + HUNK_ACP_CONFIG to override.
 acp.config.json

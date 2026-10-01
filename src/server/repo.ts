@@ -6,7 +6,7 @@ import { HttpError } from "./http"
 
 // Resolves the `repo` request param to a repository directory. Only repos
 // listed in projects.json — or linked worktrees of them — are allowed unless
-// GIT_REVIEW_ALLOW_ANY_REPO=1.
+// HUNK_ALLOW_ANY_REPO=1.
 export async function resolveRepo(param: string | null | undefined): Promise<string> {
   const repo = param || defaultRepo()
   if (!repo) throw new HttpError(400, "No repository specified")

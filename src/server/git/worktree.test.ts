@@ -103,7 +103,7 @@ describe("resolveRepo with worktrees", () => {
 
   it("rejects a worktree of an unlisted repo and a forged .git file", async () => {
     const other = createTempRepo()
-    const forged = mkdtempSync(path.join(os.tmpdir(), "git-review-forged-"))
+    const forged = mkdtempSync(path.join(os.tmpdir(), "hunk-forged-"))
     try {
       other.git("commit", "-q", "--allow-empty", "-m", "i")
       const dir = path.join(path.dirname(other.dir), `${path.basename(other.dir)}-wt`)

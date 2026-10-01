@@ -22,14 +22,14 @@ export interface AgentHandlers {
 }
 
 // Env vars that break a nested agent: CLAUDECODE makes claude refuse to
-// start ("nested session") when git-review itself runs under Claude Code,
+// start ("nested session") when hunk itself runs under Claude Code,
 // and NODE_OPTIONS from `next dev` isn't meant for the child.
 const STRIPPED_ENV = ["CLAUDECODE", "NODE_OPTIONS", "CLAUDE_CODE_ENTRYPOINT"]
 
 // Every running agent child, kept on globalThis (dev HMR) so one exit hook
 // can kill them all. It must be synchronous: nothing async runs during exit.
-const g = globalThis as typeof globalThis & { __gitReviewAcpChildren?: Set<ChildProcess> }
-const children: Set<ChildProcess> = (g.__gitReviewAcpChildren ??= (() => {
+const g = globalThis as typeof globalThis & { __hunkAcpChildren?: Set<ChildProcess> }
+const children: Set<ChildProcess> = (g.__hunkAcpChildren ??= (() => {
   const set = new Set<ChildProcess>()
   process.once("exit", () => {
     for (const child of set) child.kill("SIGTERM")
@@ -109,7 +109,7 @@ export class AgentProcess {
         connection.initialize({
           protocolVersion: PROTOCOL_VERSION,
           clientCapabilities: { fs: { readTextFile: false, writeTextFile: false }, terminal: false },
-          clientInfo: { name: "git-review", version: "0.1.0" },
+          clientInfo: { name: "hunk", version: "0.1.0" },
         }),
         startFailed,
         timeout,

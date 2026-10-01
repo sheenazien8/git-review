@@ -98,12 +98,12 @@ describe("persistence", () => {
   })
 
   it("falls back to the first tab when the stored active id is stale", () => {
-    localStorage.setItem(`git-review-tabs-${btoa(repo)}`, JSON.stringify({ tabs: [{ file: "a", staged: false, fromAll: true }], activeId: "gone" }))
+    localStorage.setItem(`hunk-tabs-${btoa(repo)}`, JSON.stringify({ tabs: [{ file: "a", staged: false, fromAll: true }], activeId: "gone" }))
     expect(readPersistedBuffer(repo).activeId).toBe(newEntry(repo, { file: "a", staged: false, fromAll: true }).id)
   })
 
   it("ignores malformed data", () => {
-    localStorage.setItem(`git-review-tabs-${btoa(repo)}`, "{nope")
+    localStorage.setItem(`hunk-tabs-${btoa(repo)}`, "{nope")
     expect(readPersistedBuffer(repo)).toEqual(emptyBuffer)
   })
 })

@@ -46,7 +46,7 @@ export default function LoginPage() {
       <Card className="w-full max-w-sm">
         <CardHeader className="space-y-1">
           <CardTitle className="text-2xl font-semibold tracking-tight text-center">
-            Git Review
+            Hunk
           </CardTitle>
           <p className="text-sm text-muted-foreground text-center">
             Sign in to access the repository

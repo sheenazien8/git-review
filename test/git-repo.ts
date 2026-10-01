@@ -19,7 +19,7 @@ export interface TempRepo {
 }
 
 export function createTempRepo(): TempRepo {
-  const dir = mkdtempSync(path.join(os.tmpdir(), "git-review-test-"))
+  const dir = mkdtempSync(path.join(os.tmpdir(), "hunk-test-"))
   const git = (...args: string[]) => execFileSync("git", args, { cwd: dir, encoding: "utf-8" })
   git("init", "-q", "-b", "main")
   return {

@@ -4,8 +4,8 @@ import { api } from "@/lib/api-client"
 import { applyEvents, emptyTranscript, touchesFiles, type Transcript } from "@/lib/acp/transcript"
 import type { AcpAction, AcpEvent, AgentInfo, SeqEvent } from "@/lib/acp/types"
 
-const AGENT_KEY = "git-review-agent"
-const SESSION_PREFIX = "git-review-agent-session-"
+const AGENT_KEY = "hunk-agent"
+const SESSION_PREFIX = "hunk-agent-session-"
 const FILES_CHANGED_DEBOUNCE_MS = 400
 
 export type StreamStatus = "connecting" | "open" | "closed"

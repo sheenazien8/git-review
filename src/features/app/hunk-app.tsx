@@ -44,7 +44,7 @@ const BRANCH_ACTIONS = new Set<ActionName>(["commit", "push", "switchBranch", "c
 const STASH_ACTIONS = new Set<ActionName>(["switchBranch", "stash", "stashPop", "stashApply", "stashDrop"])
 const HISTORY_ACTIONS = new Set<ActionName>(["commit", "switchBranch", "createBranch"])
 
-export function GitReviewApp() {
+export function HunkApp() {
   const { isDark, toggleTheme } = useTheme()
   // Seed with the first project so the client always knows the active repo,
   // keeping the copy path:line action's full path honest from first load.

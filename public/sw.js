@@ -1,4 +1,4 @@
-const CACHE_NAME = "git-review-v1";
+const CACHE_NAME = "hunk-v1";
 const STATIC_ASSETS = [
   "/",
   "/manifest.webmanifest",

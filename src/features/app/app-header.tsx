@@ -67,7 +67,7 @@ export function AppHeader(props: {
           <PanelLeft size={16} />
         </Button>
         <GitBranch size={18} className="text-muted-foreground" />
-        <h1 className="text-sm font-semibold sm:text-lg">Git Review</h1>
+        <h1 className="text-sm font-semibold sm:text-lg">Hunk</h1>
         <div className="flex min-w-0 items-center gap-1">{props.branchControls}</div>
         <div className="flex-1" />
         {actionResult && (
