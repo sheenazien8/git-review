@@ -3,6 +3,7 @@ import {
   type BufferState,
   TAB_CAP,
   bufferReducer,
+  commitTabKey,
   emptyBuffer,
   newEntry,
   readPersistedBuffer,
@@ -54,6 +55,16 @@ describe("bufferReducer", () => {
     expect(s.activeId).toBe(entry("new").id)
   })
 
+  it("keys commit tabs by sha alone", () => {
+    const a = newEntry(repo, commitTabKey("abc123", "x.ts"))
+    const b = newEntry(repo, commitTabKey("abc123", "y.ts"))
+    expect(a.id).toBe(b.id)
+    expect(a.id).not.toBe(entry("").id)
+    expect(a).toMatchObject({ file: "", commit: "abc123", commitFile: "x.ts", commitData: null })
+    const s = bufferReducer(bufferReducer(emptyBuffer, { type: "open", entry: a }), { type: "open", entry: b })
+    expect(s.entries).toHaveLength(1)
+  })
+
   it("updates a single entry", () => {
     const s = bufferReducer(openAll(["a", "b"]), { type: "update", id: entry("a").id, patch: { diff: "x" } })
     expect(s.entries.map(e => e.diff)).toEqual(["x", ""])
@@ -76,6 +87,14 @@ describe("persistence", () => {
     expect(restored.entries.map(e => e.file)).toEqual(["a", "b"])
     expect(restored.activeId).toBe(entry("a").id)
     expect(readPersistedBuffer("/other")).toEqual(emptyBuffer)
+  })
+
+  it("round-trips commit tabs", () => {
+    const commit = newEntry(repo, commitTabKey("abc123", "x.ts"))
+    writePersistedBuffer(repo, bufferReducer(openAll(["a"]), { type: "open", entry: commit }))
+    const restored = readPersistedBuffer(repo)
+    expect(restored.entries.map(e => [e.file, e.commit, e.commitFile])).toEqual([["a", undefined, undefined], ["", "abc123", "x.ts"]])
+    expect(restored.activeId).toBe(commit.id)
   })
 
   it("falls back to the first tab when the stored active id is stale", () => {

@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server"
 import type { DiffSide } from "@/lib/git/types"
 import { getDiff } from "@/server/git/diff"
+import { getCommitDiff } from "@/server/git/log"
 import { requireParam, withErrors } from "@/server/http"
 import { resolveRepo } from "@/server/repo"
 
@@ -15,6 +16,10 @@ export const GET = withErrors("Failed to load diff", async req => {
   const file = requireParam(params.get("file"), "No file specified")
   // Source path when `file` is a rename target.
   const oldPath = params.get("oldPath") || undefined
-  const diff = await getDiff(repo, { file, oldPath, side: sideFromParam(params.get("staged")) })
+  // With `commit`: the file's change in that commit instead of the working tree.
+  const commit = params.get("commit")
+  const diff = commit
+    ? await getCommitDiff(repo, commit, { file, oldPath })
+    : await getDiff(repo, { file, oldPath, side: sideFromParam(params.get("staged")) })
   return NextResponse.json({ diff })
 })

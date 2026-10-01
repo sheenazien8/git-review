@@ -5,7 +5,10 @@ import { TooltipProvider } from "@/components/ui/tooltip"
 import { AgentFrame, useAgentPanel } from "@/features/agent/agent-frame"
 import { AgentPanel } from "@/features/agent/agent-panel"
 import { useAgent } from "@/features/agent/use-agent"
-import type { BufferEntry } from "@/features/buffer/buffer"
+import { DeleteBranchDialog, SwitchBranchDialog } from "@/features/branches/branch-dialogs"
+import { BranchPicker } from "@/features/branches/branch-picker"
+import { localNameOf, useBranches } from "@/features/branches/use-branches"
+import { type BufferEntry, commitTabKey, makeTabId } from "@/features/buffer/buffer"
 import { TabBar } from "@/features/buffer/tab-bar"
 import { useBuffer } from "@/features/buffer/use-buffer"
 import { useEditing } from "@/features/buffer/use-editing"
@@ -14,19 +17,32 @@ import { isDiscardAction, useGitActions } from "@/features/changes/use-git-actio
 import { useGitStatus } from "@/features/changes/use-git-status"
 import { focusFindInput } from "@/features/find/highlight-segments"
 import { useFind } from "@/features/find/use-find"
+import { useHistory } from "@/features/history/use-history"
+import { QuickOpen } from "@/features/quick-open/quick-open"
+import { useQuickOpen } from "@/features/quick-open/use-quick-open"
 import { defaultRepo, selectionFromUrl, syncRepoToUrl } from "@/features/projects/projects"
-import { SidebarContent } from "@/features/sidebar/sidebar-content"
+import { SidebarContent, type SidebarTab } from "@/features/sidebar/sidebar-content"
 import { SidebarFrame } from "@/features/sidebar/sidebar-frame"
 import { useExpandedDirs, useSidebar } from "@/features/sidebar/use-sidebar"
+import { StashMenu } from "@/features/stash/stash-menu"
+import { useStash } from "@/features/stash/use-stash"
 import { useTheme } from "@/features/theme/theme"
 import { ViewerPanel, type ViewerHandlers } from "@/features/viewer/viewer-panel"
 import { useWorktrees } from "@/features/worktrees/use-worktrees"
 import { AddWorktreeDialog, type NewWorktree, RemoveWorktreeDialog } from "@/features/worktrees/worktree-dialogs"
 import { samePath } from "@/features/worktrees/worktrees"
 import { mentionableFiles } from "@/lib/acp/mentions"
+import { countConflicts, parseConflicts, resolveConflict } from "@/lib/git/parse-conflict"
 import type { ActionName, ActionPayload, Worktree } from "@/lib/git/types"
 import { AppHeader } from "./app-header"
 import { useKeyboardShortcuts } from "./use-keyboard-shortcuts"
+
+// Actions that rewrite the working tree: open tabs show stale content after them.
+const TREE_ACTIONS = new Set<ActionName>(["switchBranch", "createBranch", "stash", "stashPop", "stashApply"])
+// Actions after which the branch list / stash list / history may differ.
+const BRANCH_ACTIONS = new Set<ActionName>(["commit", "push", "switchBranch", "createBranch", "deleteBranch", "addWorktree", "removeWorktree"])
+const STASH_ACTIONS = new Set<ActionName>(["switchBranch", "stash", "stashPop", "stashApply", "stashDrop"])
+const HISTORY_ACTIONS = new Set<ActionName>(["commit", "switchBranch", "createBranch"])
 
 export function GitReviewApp() {
   const { isDark, toggleTheme } = useTheme()
@@ -49,6 +65,16 @@ export function GitReviewApp() {
   const discardDialog = useDialog<DiscardRequest>()
   const [addWorktreeOpen, setAddWorktreeOpen] = useState(false)
   const removeWorktreeDialog = useDialog<Worktree>()
+  const history = useHistory(repoPath)
+  const branches = useBranches(repoPath)
+  const stash = useStash(repoPath)
+  const [sidebarTab, setSidebarTab] = useState<SidebarTab>("changes")
+  const switchBranchDialog = useDialog<string>()
+  const deleteBranchDialog = useDialog<string>()
+
+  // The active tab is an unmerged file: the viewer shows conflict resolution.
+  const conflicted = !!active && !active.commit && !active.fromAll && !active.staged
+    && status.files.some(f => f.path === active.file && f.status === "conflicted")
 
   // --- Opening files --------------------------------------------------------
 
@@ -69,17 +95,58 @@ export function GitReviewApp() {
     buffer.open({ file, staged, fromAll: false, oldPath: matched?.oldPath })
   }, [status.files, buffer, dirs])
 
+  // From Quick Open. With a line, open the file itself (not its diff) so the
+  // line can be scrolled to, like an editor would.
+  const openFromQuickOpen = useCallback((file: string, line?: number) => {
+    if (line === undefined) {
+      openFromTree(file)
+      return
+    }
+    dirs.expandAncestors(file)
+    const key = { file, staged: false, fromAll: true }
+    const existing = buffer.entries.find(b => b.id === makeTabId(repoPath, key))
+    buffer.open(key)
+    buffer.update(makeTabId(repoPath, key), {
+      gotoLine: { line },
+      mdRender: false,
+      ...(existing?.viewMode === "blame" ? { viewMode: "split" as const } : {}),
+    })
+  }, [openFromTree, dirs, buffer, repoPath])
+
+  const openCommit = useCallback((sha: string, file?: string) => {
+    buffer.open(commitTabKey(sha, file))
+  }, [buffer])
+
+  // Scopes the History tab to one file and brings it into view.
+  const showHistory = useCallback((file: string) => {
+    history.showFile(file)
+    setSidebarTab("history")
+    if (window.matchMedia("(min-width: 768px)").matches) {
+      if (!sidebar.open) sidebar.toggle()
+    } else {
+      sidebar.setMobileOpen(true)
+    }
+  }, [history, sidebar])
+
   // --- Git actions ----------------------------------------------------------
 
   // Reconciles the open tabs with the repo after a successful action.
   const afterAction = useCallback(async (action: ActionName, payload?: ActionPayload) => {
     // Worktree add/remove don't touch this worktree's files; the caller
     // switches repos itself, which reloads status.
+    if (BRANCH_ACTIONS.has(action)) void branches.load()
+    if (STASH_ACTIONS.has(action)) void stash.load()
+    if (HISTORY_ACTIONS.has(action)) history.reload()
     if (action === "addWorktree" || action === "removeWorktree") {
       await worktrees.load()
       return
     }
     const fresh = await status.loadStatus()
+    // Switching branches / stashing changed files under every open tab.
+    if (TREE_ACTIONS.has(action) && active && !active.commit && !active.dirty && !active.editMode) {
+      void buffer.fetchEntry(active)
+    }
+    if (action === "switchBranch" || (action === "createBranch" && payload?.checkout)) void worktrees.load()
     const discard = isDiscardAction(action)
     const touchesActive = !!active && (payload?.files?.includes(active.file) ?? false)
     if (fresh && active && discard) {
@@ -98,7 +165,7 @@ export function GitReviewApp() {
       void status.loadAllFiles()
       if (action === "create" && payload?.path) openFromTree(payload.path)
     }
-  }, [status, active, buffer, openFromTree, worktrees])
+  }, [status, active, buffer, openFromTree, worktrees, branches, stash, history])
 
   const { busyAction, actionResult, setActionResult, runAction } = useGitActions(repoPath, afterAction)
 
@@ -114,6 +181,12 @@ export function GitReviewApp() {
   const agentPanel = useAgentPanel()
   const repoFiles = useMemo(() => mentionableFiles(status.allFiles), [status.allFiles])
   const changedFiles = useMemo(() => [...new Set(status.files.map(f => f.path))], [status.files])
+  const quickOpen = useQuickOpen()
+  // Open file tabs, most recent first, the active one left out.
+  const recentFiles = useMemo(
+    () => [...new Set(buffer.entries.filter(b => !b.commit && b.id !== buffer.activeId).map(b => b.file).reverse())],
+    [buffer.entries, buffer.activeId],
+  )
   const agent = useAgent(repoPath, agentPanel.visible, agentChangedFiles)
   const editing = useEditing({ repoPath, buffer, files: status.files, loadStatus: status.loadStatus, setActionResult })
 
@@ -125,6 +198,35 @@ export function GitReviewApp() {
     if (!request) return
     discardDialog.setOpen(false)
     await runAction(request.action, request.files ? { files: request.files } : undefined)
+  }
+
+  // --- Branches & stash ---------------------------------------------------
+
+  // A remote branch with a local counterpart switches to the local one.
+  const requestSwitchBranch = (name: string) => {
+    let target = name
+    if (branches.branches.find(b => b.name === name)?.remote) {
+      const local = localNameOf(name)
+      if (branches.branches.some(b => !b.remote && b.name === local)) target = local
+    }
+    if (buffer.entries.some(b => b.dirty) && !window.confirm("Open tabs have unsaved changes. Switch branches anyway?")) return
+    // git would carry tracked changes over (or refuse) — offer to stash them.
+    if (status.files.some(f => f.status !== "untracked")) switchBranchDialog.show(target)
+    else void runAction("switchBranch", { branch: target })
+  }
+
+  const confirmSwitchBranch = async () => {
+    const branch = switchBranchDialog.value
+    if (!branch) return
+    switchBranchDialog.setOpen(false)
+    await runAction("switchBranch", { branch, stash: true })
+  }
+
+  const confirmDeleteBranch = async (force: boolean) => {
+    const branch = deleteBranchDialog.value
+    if (!branch) return
+    deleteBranchDialog.setOpen(false)
+    await runAction("deleteBranch", { branch, force })
   }
 
   const confirmDelete = async () => {
@@ -144,9 +246,10 @@ export function GitReviewApp() {
   }, [buffer])
 
   const openFind = useCallback(() => {
+    if (!active || active.commit || conflicted) return
     find.open()
     focusFindInput()
-  }, [find])
+  }, [find, active, conflicted])
 
   // Points the app at another worktree (of the current project by default).
   // Resolves to false when the user kept their unsaved tabs instead.
@@ -204,6 +307,8 @@ export function GitReviewApp() {
     toggleSidebar: sidebar.toggle,
     toggleAgent: agentPanel.toggle,
     save: editing.saveFile,
+    quickOpenOpen: quickOpen.open,
+    openQuickOpen: quickOpen.show,
   })
 
   const viewerHandlers: ViewerHandlers = {
@@ -224,10 +329,35 @@ export function GitReviewApp() {
     },
     delete: deleteDialog.show,
     toggleFind: () => (active?.findOpen ? find.close() : openFind()),
+    toggleBlame: entry => {
+      const blame = entry.viewMode !== "blame"
+      buffer.update(entry.id, { viewMode: blame ? "blame" : "split" })
+      if (blame && (!entry.blame || entry.blameError)) void buffer.fetchBlame(entry)
+      if (!blame && entry.fromAll && !entry.raw) void buffer.fetchRaw(entry)
+    },
+    showHistory,
+    openCommit,
+    openFile: openFromTree,
+    resolveConflict: (index, choice) => {
+      if (!active) return
+      const next = resolveConflict(active.dirty ? active.editContent : active.raw, index, choice)
+      buffer.update(active.id, { editContent: next, dirty: next !== active.raw })
+    },
+    revertResolutions: entry => buffer.update(entry.id, { editContent: "", dirty: false }),
+    markResolved: entry => {
+      const left = countConflicts(parseConflicts(entry.raw))
+      if (left > 0 && !window.confirm(`This file still has ${left} conflict${left > 1 ? "s" : ""}. Mark it as resolved anyway?`)) return
+      void runAction("add", { files: [entry.file] })
+    },
   }
 
   const renderSidebar = (onNavigate: () => void) => (
     <SidebarContent
+      tab={sidebarTab}
+      onTabChange={setSidebarTab}
+      history={history}
+      activeCommit={active?.commit}
+      onOpenCommit={openCommit}
       files={status.files}
       allFiles={status.allFiles}
       loading={status.loading}
@@ -244,6 +374,7 @@ export function GitReviewApp() {
         onStage: (files, staged) => runAction(staged ? "unstage" : "add", { files }),
         onDiscard: requestDiscard,
         onDelete: deleteDialog.show,
+        onShowHistory: showHistory,
       }}
     />
   )
@@ -252,7 +383,32 @@ export function GitReviewApp() {
     <TooltipProvider delayDuration={0}>
       <div className="flex h-dvh flex-col overflow-hidden bg-background text-foreground">
         <AppHeader
-          branch={status.branch}
+          branchControls={
+            <>
+              <BranchPicker
+                current={branches.current || status.branch}
+                branches={branches.branches}
+                repoPath={repoPath}
+                busy={!!busyAction}
+                onOpen={() => void branches.load()}
+                onSwitch={requestSwitchBranch}
+                onCreate={branch => void runAction("createBranch", { branch, checkout: true })}
+                onDelete={deleteBranchDialog.show}
+              />
+              <StashMenu
+                stashes={stash.stashes}
+                busy={!!busyAction}
+                onOpen={() => void stash.load()}
+                onStash={(message, includeUntracked) => runAction("stash", { message, includeUntracked })}
+                onView={s => openCommit(s.sha)}
+                onApply={s => void runAction("stashApply", { index: s.index })}
+                onPop={s => void runAction("stashPop", { index: s.index })}
+                onDrop={s => {
+                  if (window.confirm(`Drop stash@{${s.index}}? This can't be undone.`)) void runAction("stashDrop", { index: s.index })
+                }}
+              />
+            </>
+          }
           error={status.error}
           loading={status.loading}
           actionResult={actionResult}
@@ -267,6 +423,7 @@ export function GitReviewApp() {
           onToggleAgent={agentPanel.toggle}
           onOpenMobileSidebar={() => sidebar.setMobileOpen(true)}
           onNewFile={() => setCreateOpen(true)}
+          onQuickOpen={quickOpen.show}
           onDiscardAll={() => discardDialog.show({ action: "discardAll" })}
           onProjectChange={dir => switchRepo(dir, dir)}
           onWorktreeChange={path => switchRepo(path)}
@@ -290,10 +447,12 @@ export function GitReviewApp() {
             />
             <ViewerPanel
               active={active}
+              repoPath={repoPath}
+              conflicted={conflicted}
               fullPath={active ? (repoPath ? `${repoPath}/${active.file}` : active.file) : ""}
               busyAction={busyAction}
               isSaving={editing.isSaving}
-              canEdit={!!active && editing.canEdit(active.file)}
+              canEdit={!!active && !active.commit && editing.canEdit(active.file)}
               find={find}
               on={viewerHandlers}
             />
@@ -306,7 +465,7 @@ export function GitReviewApp() {
                 repo={repoPath}
                 files={repoFiles}
                 changedFiles={changedFiles}
-                activeFile={active?.file ?? null}
+                activeFile={active && !active.commit ? active.file : null}
                 onClose={agentPanel.close}
                 onOpenFile={file => {
                   openFromTree(file)
@@ -317,6 +476,14 @@ export function GitReviewApp() {
           />
         </div>
 
+        <QuickOpen
+          open={quickOpen.open}
+          onOpenChange={quickOpen.setOpen}
+          files={repoFiles}
+          recent={recentFiles}
+          changed={status.files}
+          onOpen={openFromQuickOpen}
+        />
         <CreateFileDialog
           open={createOpen}
           onOpenChange={setCreateOpen}
@@ -344,6 +511,20 @@ export function GitReviewApp() {
           branches={worktrees.branches}
           busy={busyAction === "addWorktree"}
           onCreate={addWorktree}
+        />
+        <SwitchBranchDialog
+          open={switchBranchDialog.open}
+          onOpenChange={switchBranchDialog.setOpen}
+          branch={switchBranchDialog.value}
+          busy={busyAction === "switchBranch"}
+          onConfirm={confirmSwitchBranch}
+        />
+        <DeleteBranchDialog
+          open={deleteBranchDialog.open}
+          onOpenChange={deleteBranchDialog.setOpen}
+          branch={deleteBranchDialog.value}
+          busy={busyAction === "deleteBranch"}
+          onConfirm={confirmDeleteBranch}
         />
         <RemoveWorktreeDialog
           open={removeWorktreeDialog.open}

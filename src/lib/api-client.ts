@@ -9,8 +9,13 @@ import type {
   ActionPayload,
   ActionResponse,
   AllFilesResponse,
+  BlameResponse,
+  BranchesResponse,
+  CommitResponse,
   ContentResponse,
   DiffResponse,
+  LogResponse,
+  StashResponse,
   StatusResponse,
   WorktreesResponse,
 } from "@/lib/git/types"
@@ -54,6 +59,31 @@ export const api = {
   async diff(repo: string, file: string, staged: boolean, oldPath?: string) {
     const qs = query({ repo, file, staged: staged ? "1" : "0", oldPath })
     return (await request<DiffResponse>(`/api/git/diff?${qs}`)).diff
+  },
+
+  // One file's change in a commit.
+  async commitDiff(repo: string, commit: string, file: string, oldPath?: string) {
+    return (await request<DiffResponse>(`/api/git/diff?${query({ repo, commit, file, oldPath })}`)).diff
+  },
+
+  blame(repo: string, file: string, ref?: string) {
+    return request<BlameResponse>(`/api/git/blame?${query({ repo, file, ref })}`)
+  },
+
+  log(repo: string, { file, limit, skip }: { file?: string; limit: number; skip: number }) {
+    return request<LogResponse>(`/api/git/log?${query({ repo, file, limit: String(limit), skip: String(skip) })}`)
+  },
+
+  commit(repo: string, sha: string) {
+    return request<CommitResponse>(`/api/git/commit?${query({ repo, sha })}`)
+  },
+
+  branches(repo: string) {
+    return request<BranchesResponse>(`/api/git/branches?${query({ repo })}`)
+  },
+
+  async stashes(repo: string) {
+    return (await request<StashResponse>(`/api/git/stash?${query({ repo })}`)).stashes
   },
 
   async content(repo: string, file: string) {

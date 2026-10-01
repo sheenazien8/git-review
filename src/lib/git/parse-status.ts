@@ -16,6 +16,9 @@ function worktreeStatus(c: string): FileStatus {
   return c === "D" ? "deleted" : "modified"
 }
 
+// XY codes of unmerged paths (both sides changed, or one side deleted).
+const UNMERGED = new Set(["DD", "AU", "UD", "UA", "DU", "AA", "UU"])
+
 // Parses `git status --porcelain` (v1) output.
 export function parseStatus(output: string): GitFile[] {
   const files: GitFile[] = []
@@ -27,6 +30,11 @@ export function parseStatus(output: string): GitFile[] {
 
     if (index === "?" && worktree === "?") {
       files.push({ path, status: "untracked", staged: false })
+      continue
+    }
+    // Nothing is staged for an unmerged path until it's resolved (`git add`).
+    if (UNMERGED.has(index + worktree)) {
+      files.push({ path, status: "conflicted", staged: false })
       continue
     }
 

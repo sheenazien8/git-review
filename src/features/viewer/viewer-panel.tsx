@@ -1,9 +1,11 @@
 import type { ReactNode } from "react"
 import {
   AlignJustify,
+  Check,
   Eye,
   FileCode,
   FilePen,
+  History,
   Maximize,
   Minimize,
   Minus,
@@ -11,9 +13,11 @@ import {
   RefreshCw,
   RotateCcw,
   Save,
+  ScanText,
   Search,
   Split,
   Trash2,
+  Undo2,
 } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card"
@@ -23,6 +27,7 @@ import type { BufferEntry, ViewMode } from "@/features/buffer/buffer"
 import { basename, isMarkdownFile } from "@/features/files/file-types"
 import { FindBar } from "@/features/find/find-bar"
 import type { Find } from "@/features/find/use-find"
+import type { ConflictChoice } from "@/lib/git/parse-conflict"
 import type { ActionName } from "@/lib/git/types"
 import { FileViewer } from "./file-viewer"
 import { useFullscreen } from "./use-fullscreen"
@@ -37,6 +42,15 @@ export interface ViewerHandlers {
   setViewMode: (entry: BufferEntry, mode: ViewMode) => void
   delete: (file: string) => void
   toggleFind: () => void
+  toggleBlame: (entry: BufferEntry) => void
+  showHistory: (file: string) => void
+  openCommit: (sha: string) => void
+  openFile: (file: string) => void
+  resolveConflict: (index: number, choice: ConflictChoice) => void
+  // Drop conflict resolutions that haven't been saved.
+  revertResolutions: (entry: BufferEntry) => void
+  // Stage a conflicted file (git add).
+  markResolved: (entry: BufferEntry) => void
 }
 
 function IconTip({ tip, children }: { tip: string; children: ReactNode }) {
@@ -49,9 +63,12 @@ function IconTip({ tip, children }: { tip: string; children: ReactNode }) {
 }
 
 // The main card: file title + toolbar, find bar, and the file view.
-export function ViewerPanel({ active, fullPath, busyAction, isSaving, canEdit, find, on }: {
+export function ViewerPanel({ active, repoPath, fullPath, conflicted, busyAction, isSaving, canEdit, find, on }: {
   active: BufferEntry | null
+  repoPath: string
   fullPath: string
+  // The active file is unmerged (conflict view).
+  conflicted: boolean
   busyAction: ActionName | null
   isSaving: boolean
   canEdit: boolean
@@ -60,21 +77,51 @@ export function ViewerPanel({ active, fullPath, busyAction, isSaving, canEdit, f
 }) {
   const { ref: cardRef, isFullscreen, toggle: toggleFullscreen } = useFullscreen<HTMLDivElement>()
   const editing = !!active?.editMode
+  const commit = active?.commit
+  // Conflict resolution replaces the diff views (manual editing still works).
+  const resolving = conflicted && !editing
+  // Toolbar for a working-tree file (not a commit tab).
+  const fileTools = !!active && !commit
+
+  let title = active ? basename(active.file) : "Select a file"
+  if (commit) title = `Commit ${commit.slice(0, 7)}`
+  const subtitle = commit ? active?.commitData?.commit.subject ?? "" : active?.file
 
   return (
     <Card ref={cardRef} className="diff-card flex min-h-0 flex-1 flex-col overflow-hidden">
       <CardHeader className="shrink-0 p-3 pb-2">
         <div className="flex items-center justify-between gap-2">
-          <CardTitle className="truncate text-sm">{active ? basename(active.file) : "Select a file"}</CardTitle>
+          <CardTitle className="truncate text-sm">{title}</CardTitle>
           {active && (
             <div className="flex items-center gap-1">
-              {editing && (
+              {(editing || (resolving && active.dirty)) && (
                 <Button variant="default" size="sm" className="h-7 gap-1" disabled={!active.dirty || isSaving} onClick={on.save}>
                   {isSaving ? <RefreshCw size={13} className="animate-spin" /> : <Save size={13} />}
                   Save
                 </Button>
               )}
-              {!active.fromAll && !editing && (
+              {resolving && active.dirty && (
+                <IconTip tip="Revert unsaved resolutions">
+                  <Button variant="outline" size="icon" className="h-7 w-7" onClick={() => on.revertResolutions(active)}>
+                    <Undo2 size={13} />
+                  </Button>
+                </IconTip>
+              )}
+              {resolving && (
+                <IconTip tip={active.dirty ? "Save before marking as resolved" : "Mark as resolved (stage)"}>
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    className="h-7 gap-1"
+                    disabled={active.dirty || !!busyAction}
+                    onClick={() => on.markResolved(active)}
+                  >
+                    {busyAction === "add" ? <RefreshCw size={13} className="animate-spin" /> : <Check size={13} />}
+                    <span className="hidden sm:inline">Mark resolved</span>
+                  </Button>
+                </IconTip>
+              )}
+              {fileTools && !active.fromAll && !editing && !resolving && (
                 <>
                   <IconTip tip={active.staged ? "Discard staged changes" : "Discard changes"}>
                     <Button
@@ -96,7 +143,7 @@ export function ViewerPanel({ active, fullPath, busyAction, isSaving, canEdit, f
                   </IconTip>
                 </>
               )}
-              {isMarkdownFile(active.file) && !editing && (
+              {fileTools && isMarkdownFile(active.file) && !editing && !resolving && active.viewMode !== "blame" && (
                 <Button
                   variant={active.mdRender ? "default" : "outline"}
                   size="icon"
@@ -107,14 +154,14 @@ export function ViewerPanel({ active, fullPath, busyAction, isSaving, canEdit, f
                   <Eye size={13} />
                 </Button>
               )}
-              {canEdit && !editing && (
+              {fileTools && canEdit && !editing && (
                 <IconTip tip="Edit file">
                   <Button variant="outline" size="icon" className="h-7 w-7" title="Edit file" onClick={on.toggleEdit}>
                     <FilePen size={13} />
                   </Button>
                 </IconTip>
               )}
-              {active.fromAll && !editing && (
+              {fileTools && active.fromAll && !editing && (
                 <IconTip tip="Delete file">
                   <Button
                     variant="outline"
@@ -134,7 +181,27 @@ export function ViewerPanel({ active, fullPath, busyAction, isSaving, canEdit, f
                   </Button>
                 </IconTip>
               )}
-              {!active.fromAll && !editing && (
+              {fileTools && !editing && (
+                <IconTip tip="File history">
+                  <Button variant="outline" size="icon" className="h-7 w-7" onClick={() => on.showHistory(active.file)}>
+                    <History size={13} />
+                  </Button>
+                </IconTip>
+              )}
+              {fileTools && !editing && !resolving && (
+                <IconTip tip="Blame">
+                  <Button
+                    variant={active.viewMode === "blame" ? "default" : "outline"}
+                    size="icon"
+                    className="h-7 w-7"
+                    aria-pressed={active.viewMode === "blame"}
+                    onClick={() => on.toggleBlame(active)}
+                  >
+                    <ScanText size={13} />
+                  </Button>
+                </IconTip>
+              )}
+              {fileTools && !active.fromAll && !editing && !resolving && (
                 <>
                   <Button
                     variant={active.viewMode === "raw" ? "default" : "outline"}
@@ -163,7 +230,7 @@ export function ViewerPanel({ active, fullPath, busyAction, isSaving, canEdit, f
                   </Button>
                 </>
               )}
-              {!editing && (
+              {fileTools && !editing && !resolving && (
                 <Button
                   variant={active.findOpen ? "default" : "outline"}
                   size="icon"
@@ -186,7 +253,7 @@ export function ViewerPanel({ active, fullPath, busyAction, isSaving, canEdit, f
             </div>
           )}
         </div>
-        {active?.findOpen && !editing && (
+        {active?.findOpen && fileTools && !editing && !resolving && (
           <div className="mt-2">
             <FindBar
               query={active.findQuery}
@@ -201,11 +268,21 @@ export function ViewerPanel({ active, fullPath, busyAction, isSaving, canEdit, f
             />
           </div>
         )}
-        {active && <p className="mt-1 truncate text-xs text-muted-foreground">{active.file}</p>}
+        {subtitle && <p className="mt-1 truncate text-xs text-muted-foreground">{subtitle}</p>}
       </CardHeader>
       <Separator />
       <CardContent className="diff-content min-h-0 flex-1 p-0">
-        <FileViewer entry={active} fullPath={fullPath} onEditChange={on.editChange} onMatchIndexClamp={find.setIndex} />
+        <FileViewer
+          entry={active}
+          repoPath={repoPath}
+          fullPath={fullPath}
+          conflicted={conflicted}
+          onEditChange={on.editChange}
+          onMatchIndexClamp={find.setIndex}
+          onOpenCommit={on.openCommit}
+          onOpenFile={on.openFile}
+          onResolveConflict={on.resolveConflict}
+        />
       </CardContent>
     </Card>
   )

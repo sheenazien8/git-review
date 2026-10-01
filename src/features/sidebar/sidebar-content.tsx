@@ -2,6 +2,8 @@ import { useMemo } from "react"
 import { Search } from "lucide-react"
 import { Skeleton } from "@/components/ui/skeleton"
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs"
+import { HistoryList } from "@/features/history/history-list"
+import type { History } from "@/features/history/use-history"
 import type { GitFile, RepoEntry } from "@/lib/git/types"
 import { FileTree, type FileTreeProps, type TreeMode } from "./file-tree"
 import { buildTree, filterTreeNodes } from "./tree"
@@ -25,15 +27,20 @@ function Empty({ text }: { text: string }) {
 
 function CountBadge({ n }: { n: number }) {
   return (
-    <span className="ml-1 rounded border border-border bg-muted px-1.5 py-0 text-[10px] tabular-nums text-muted-foreground">{n}</span>
+    <span className="ml-0.5 rounded border border-border bg-muted px-1 py-0 text-[10px] tabular-nums text-muted-foreground">{n}</span>
   )
 }
 
 type TreeHandlers = Omit<FileTreeProps, "nodes" | "mode" | "expandAll" | "onOpenFile">
 
-// Sidebar body: file search plus the Changes / Staged / All Files tabs.
-// `onNavigate` runs after a file is opened (closes the mobile sheet).
-export function SidebarContent({ files, allFiles, loading, search, onSearchChange, tree, onOpenChange, onOpenTreeFile, onNavigate }: {
+export type SidebarTab = TreeMode | "history"
+
+// Sidebar body: file search plus the Changes / Staged / All Files / History
+// tabs. `onNavigate` runs after a file or commit is opened (closes the mobile sheet).
+export function SidebarContent({ tab, onTabChange, files, allFiles, loading, search, onSearchChange, tree, onOpenChange, onOpenTreeFile, history, activeCommit, onOpenCommit, onNavigate }: {
+  // Controlled so "Show history" can switch to the History tab.
+  tab: SidebarTab
+  onTabChange: (tab: SidebarTab) => void
   files: GitFile[]
   allFiles: RepoEntry[]
   loading: boolean
@@ -45,6 +52,10 @@ export function SidebarContent({ files, allFiles, loading, search, onSearchChang
   onOpenChange: (file: string, staged: boolean) => void
   // Open a file from the All Files tree.
   onOpenTreeFile: (file: string) => void
+  history: History
+  // Sha of the active commit tab, highlighted in History.
+  activeCommit: string | undefined
+  onOpenCommit: (sha: string, file?: string) => void
   onNavigate: () => void
 }) {
   const expandAll = search.trim().length > 0
@@ -74,28 +85,40 @@ export function SidebarContent({ files, allFiles, loading, search, onSearchChang
   }
 
   return (
-    <Tabs defaultValue="changes" className="flex flex-col">
+    <Tabs value={tab} onValueChange={v => onTabChange(v as SidebarTab)} className="flex flex-col">
       <div className="px-2 pt-2">
         <div className="relative">
           <Search size={14} className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-muted-foreground" />
           <input
             type="search"
-            placeholder="Search files…"
+            placeholder={tab === "history" ? "Search commits…" : "Search files…"}
             value={search}
             onChange={e => onSearchChange(e.target.value)}
             className="h-8 w-full rounded-md border border-input bg-background pl-9 pr-3 text-sm text-foreground placeholder:text-muted-foreground focus:outline-none focus:ring-2 focus:ring-ring"
           />
         </div>
       </div>
-      <TabsList className="mx-2 mt-2 grid grid-cols-3">
-        <TabsTrigger value="changes" className="text-xs">Changes <CountBadge n={changesFiles.length} /></TabsTrigger>
-        <TabsTrigger value="staged" className="text-xs">Staged <CountBadge n={stagedFiles.length} /></TabsTrigger>
-        <TabsTrigger value="all" className="text-xs">All Files <CountBadge n={allFiles.length} /></TabsTrigger>
+      <TabsList className="mx-2 mt-2 grid grid-cols-4">
+        <TabsTrigger value="changes" className="px-1 text-[11px]">Changes <CountBadge n={changesFiles.length} /></TabsTrigger>
+        <TabsTrigger value="staged" className="px-1 text-[11px]">Staged <CountBadge n={stagedFiles.length} /></TabsTrigger>
+        <TabsTrigger value="all" className="px-1 text-[11px]">Files <CountBadge n={allFiles.length} /></TabsTrigger>
+        <TabsTrigger value="history" className="px-1 text-[11px]">History</TabsTrigger>
       </TabsList>
       <div className="mt-2 space-y-0">
         <TabsContent value="changes" className="mt-0 px-2">{renderTree("changes", changesFiles.length, "No changes", 5)}</TabsContent>
         <TabsContent value="staged" className="mt-0 px-2">{renderTree("staged", stagedFiles.length, "Nothing staged", 3)}</TabsContent>
         <TabsContent value="all" className="mt-0 px-2">{renderTree("all", allFiles.length, "", 6)}</TabsContent>
+        <TabsContent value="history" className="mt-0 px-2">
+          <HistoryList
+            history={history}
+            search={search}
+            activeCommit={activeCommit}
+            onOpenCommit={(sha, file) => {
+              onOpenCommit(sha, file)
+              onNavigate()
+            }}
+          />
+        </TabsContent>
       </div>
     </Tabs>
   )

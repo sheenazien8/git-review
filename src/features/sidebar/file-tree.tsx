@@ -22,6 +22,8 @@ export interface FileTreeProps {
   onStage: (files: string[], staged: boolean) => void
   onDiscard: (files: string[], staged: boolean) => void
   onDelete: (path: string) => void
+  // Right-click on a file: show its commit history.
+  onShowHistory: (path: string) => void
 }
 
 function RowButton({ title, className, disabled, onClick, children }: {
@@ -107,6 +109,10 @@ function TreeLevel(props: FileTreeProps & { depth: number }) {
               role="button"
               onClick={activate}
               onKeyDown={e => handleRowKeyDown(e, activate, dirKeys)}
+              onContextMenu={isDir ? undefined : e => {
+                e.preventDefault()
+                props.onShowHistory(node.path)
+              }}
               style={{ paddingLeft: 8 + depth * 12 }}
               className={cn(
                 "group flex items-center gap-1 rounded-md py-1.5 pr-1 text-xs outline-none transition-colors cursor-pointer focus-visible:ring-2 focus-visible:ring-ring",

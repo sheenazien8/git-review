@@ -1,15 +1,19 @@
+import type { BlameResponse, CommitResponse } from "@/lib/git/types"
+
 // The buffer is the list of open tabs. Each entry holds everything the viewer
-// needs for one (file, staged side, source) combination.
+// needs for one (file, staged side, source) combination — or, for a commit
+// tab, for one commit.
 
 export const TAB_CAP = 20
 const TABS_STORAGE_PREFIX = "git-review-tabs-"
 
-export type ViewMode = "unified" | "split" | "raw"
+export type ViewMode = "unified" | "split" | "raw" | "blame"
 
 // One open editor. The id is stable for the lifetime of the entry and is the
 // only key used to look up / mutate / remove an entry from the buffer.
 export interface BufferEntry {
   id: string
+  // Repo-relative path; "" for commit tabs.
   file: string
   staged: boolean
   // Opened from the All Files tree: shows raw content instead of a diff.
@@ -27,11 +31,23 @@ export interface BufferEntry {
   dirty: boolean
   // Optional rename hint from git status (oldPath → file).
   oldPath?: string
+  // Blame view (viewMode "blame").
+  blame: BlameResponse | null
+  blameError: string
+  // Commit tabs: the commit sha, its loaded metadata + files, and the file to
+  // expand first (when opened from a file's history).
+  commit?: string
+  commitData: CommitResponse | null
+  commitError: string
+  commitFile?: string
   // In-file find state, scoped to this tab.
   findOpen: boolean
   findQuery: string
   findCaseSensitive: boolean
   findMatchIndex: number
+  // Line to scroll to and highlight (Quick Open "path:line"). A new object
+  // per request, so jumping to the same line again scrolls again. Not persisted.
+  gotoLine?: { line: number }
 }
 
 export interface TabKey {
@@ -39,17 +55,26 @@ export interface TabKey {
   staged: boolean
   fromAll: boolean
   oldPath?: string
+  commit?: string
+  commitFile?: string
+}
+
+// Key for a commit tab.
+export function commitTabKey(sha: string, commitFile?: string): TabKey {
+  return { file: "", staged: false, fromAll: false, commit: sha, commitFile }
 }
 
 // The repo path is part of the id so a stale id from another repo never
-// resolves to a live entry.
-export function makeTabId(repo: string, file: string, staged: boolean, fromAll: boolean) {
+// resolves to a live entry. A commit gets one tab whatever file it was opened for.
+export function makeTabId(repo: string, { file, staged, fromAll, commit }: TabKey) {
+  if (commit) return `${repo}::commit::${commit}`
   return `${repo}::${file}::${staged ? "s" : "u"}::${fromAll ? "a" : "d"}`
 }
 
-export function newEntry(repo: string, { file, staged, fromAll, oldPath }: TabKey): BufferEntry {
+export function newEntry(repo: string, key: TabKey): BufferEntry {
+  const { file, staged, fromAll, oldPath, commit, commitFile } = key
   return {
-    id: makeTabId(repo, file, staged, fromAll),
+    id: makeTabId(repo, key),
     file,
     staged,
     fromAll,
@@ -64,6 +89,12 @@ export function newEntry(repo: string, { file, staged, fromAll, oldPath }: TabKe
     editContent: "",
     dirty: false,
     oldPath,
+    blame: null,
+    blameError: "",
+    commit,
+    commitData: null,
+    commitError: "",
+    commitFile,
     findOpen: false,
     findQuery: "",
     findCaseSensitive: false,
@@ -135,7 +166,7 @@ export function bufferReducer(state: BufferState, action: BufferAction): BufferS
 // Only the *list* of open tabs and the active one are persisted per repo;
 // content is always re-fetched after a reload.
 
-type PersistedTab = { file: string; staged: boolean; fromAll: boolean }
+type PersistedTab = { file: string; staged: boolean; fromAll: boolean; commit?: string; commitFile?: string }
 type PersistedBuffer = { tabs: PersistedTab[]; activeId: string | null }
 
 function tabsStorageKey(repo: string) {
@@ -168,7 +199,7 @@ export function readPersistedBuffer(repo: string): BufferState {
 export function writePersistedBuffer(repo: string, { entries, activeId }: BufferState) {
   try {
     const payload: PersistedBuffer = {
-      tabs: entries.map(b => ({ file: b.file, staged: b.staged, fromAll: b.fromAll })),
+      tabs: entries.map(b => ({ file: b.file, staged: b.staged, fromAll: b.fromAll, commit: b.commit, commitFile: b.commitFile })),
       activeId,
     }
     localStorage.setItem(tabsStorageKey(repo), JSON.stringify(payload))

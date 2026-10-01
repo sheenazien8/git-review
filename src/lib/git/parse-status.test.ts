@@ -32,3 +32,14 @@ describe("parseStatus", () => {
     expect(parseStatus("")).toEqual([])
   })
 })
+
+describe("parseStatus conflicts", () => {
+  it("reports unmerged paths once, as conflicted and unstaged", () => {
+    expect(parseStatus("UU both.txt\nAA added.txt\nDU deleted-by-us.txt\nM  staged.txt\n")).toEqual([
+      { path: "both.txt", status: "conflicted", staged: false },
+      { path: "added.txt", status: "conflicted", staged: false },
+      { path: "deleted-by-us.txt", status: "conflicted", staged: false },
+      { path: "staged.txt", status: "modified", staged: true, oldPath: undefined },
+    ])
+  })
+})

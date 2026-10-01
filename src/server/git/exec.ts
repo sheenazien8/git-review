@@ -38,7 +38,7 @@ export async function git(repo: string, args: string[], opts: GitOptions = {}): 
 export function isUnbornHead(e: unknown): boolean {
   const stderr = (e as { stderr?: string } | null)?.stderr || ""
   const msg = stderr || (e instanceof Error ? e.message : "")
-  return /Failed to resolve 'HEAD'|unborn|bad revision|unknown revision/i.test(msg)
+  return /Failed to resolve 'HEAD'|unborn|bad revision|unknown revision|does not have any commits yet/i.test(msg)
 }
 
 export function output(r: GitResult): string {

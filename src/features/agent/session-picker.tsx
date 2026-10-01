@@ -1,20 +1,10 @@
 import { useEffect, useRef, useState } from "react"
 import { ChevronDown, Circle, History, Loader2, Search } from "lucide-react"
+import { usePopover } from "@/hooks/use-popover"
 import type { AgentSessionSummary } from "@/lib/acp/types"
+import { timeAgo } from "@/lib/time-ago"
 import { cn } from "@/lib/utils"
 import { useSessionList } from "./use-session-list"
-
-function timeAgo(iso: string | undefined): string {
-  if (!iso) return ""
-  const minutes = Math.round((Date.now() - new Date(iso).getTime()) / 60_000)
-  if (!Number.isFinite(minutes)) return ""
-  if (minutes < 1) return "now"
-  if (minutes < 60) return `${minutes}m`
-  const hours = Math.round(minutes / 60)
-  if (hours < 24) return `${hours}h`
-  const days = Math.round(hours / 24)
-  return days < 30 ? `${days}d` : new Date(iso).toLocaleDateString()
-}
 
 function Row({ session, current, onPick }: { session: AgentSessionSummary; current: boolean; onPick: (id: string) => void }) {
   return (
@@ -59,12 +49,10 @@ export function SessionPicker({ repo, agentId, sessionId, title, disabled, onPic
   onPick: (id: string) => void
 }) {
   const list = useSessionList(repo, agentId)
-  const [open, setOpen] = useState(false)
+  const { open, setOpen, rootRef, triggerRef } = usePopover()
   const [filter, setFilter] = useState("")
-  const rootRef = useRef<HTMLDivElement>(null)
   const scrollRef = useRef<HTMLDivElement>(null)
   const sentinelRef = useRef<HTMLDivElement>(null)
-  const triggerRef = useRef<HTMLButtonElement>(null)
 
   const show = () => {
     setFilter("")
@@ -78,26 +66,6 @@ export function SessionPicker({ repo, agentId, sessionId, title, disabled, onPic
     close()
     onPick(id)
   }
-
-  // Close on a click outside or Escape.
-  useEffect(() => {
-    if (!open) return
-    const onPointer = (e: PointerEvent) => {
-      if (!rootRef.current?.contains(e.target as Node)) setOpen(false)
-    }
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key !== "Escape") return
-      e.stopPropagation()
-      setOpen(false)
-      triggerRef.current?.focus()
-    }
-    document.addEventListener("pointerdown", onPointer)
-    document.addEventListener("keydown", onKey, true)
-    return () => {
-      document.removeEventListener("pointerdown", onPointer)
-      document.removeEventListener("keydown", onKey, true)
-    }
-  }, [open])
 
   // Next page when the end of the list scrolls into view. A filter that
   // leaves the list short keeps the sentinel visible, so it keeps loading.

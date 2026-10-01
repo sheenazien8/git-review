@@ -1,6 +1,5 @@
 import { useState, type ReactNode } from "react"
-import { Bot, Check, FilePlus, Folder, FolderGit2, FolderMinus, FolderPlus, GitBranch, Menu, Moon, PanelLeft, RefreshCw, RotateCcw, Sun, Upload } from "lucide-react"
-import { Badge } from "@/components/ui/badge"
+import { Bot, Check, FilePlus, Folder, FolderGit2, FolderMinus, FolderPlus, GitBranch, Menu, Moon, PanelLeft, RefreshCw, RotateCcw, Search, Sun, Upload } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip"
 import type { ActionResult } from "@/features/changes/use-git-actions"
@@ -20,10 +19,12 @@ function IconTip({ tip, children }: { tip: string; children: ReactNode }) {
 
 const inputCls = "rounded-md border border-input bg-background text-sm text-foreground focus:outline-none focus:ring-2 focus:ring-ring"
 
-// Title bar (sidebar toggles, branch, last action result, theme, new file,
-// discard all) plus the project + worktree selectors / refresh / commit / push row.
+// Title bar (sidebar toggles, branch + stash controls, last action result,
+// theme, new file, discard all) plus the project + worktree selectors /
+// refresh / commit / push row.
 export function AppHeader(props: {
-  branch: string
+  // Branch picker and stash menu.
+  branchControls: ReactNode
   error: string
   loading: boolean
   actionResult: ActionResult | null
@@ -38,6 +39,7 @@ export function AppHeader(props: {
   onToggleAgent: () => void
   onOpenMobileSidebar: () => void
   onNewFile: () => void
+  onQuickOpen: () => void
   onDiscardAll: () => void
   onProjectChange: (project: string) => void
   onWorktreeChange: (repo: string) => void
@@ -47,7 +49,7 @@ export function AppHeader(props: {
   onCommit: (message: string) => Promise<boolean>
   onPush: () => void
 }) {
-  const { branch, error, loading, actionResult, busyAction, isDark, worktrees } = props
+  const { error, loading, actionResult, busyAction, isDark, worktrees } = props
   const activeWorktree = findWorktree(worktrees, props.repoPath)
   const [commitMsg, setCommitMsg] = useState("")
 
@@ -66,7 +68,7 @@ export function AppHeader(props: {
         </Button>
         <GitBranch size={18} className="text-muted-foreground" />
         <h1 className="text-sm font-semibold sm:text-lg">Git Review</h1>
-        {branch && <Badge variant="secondary" className="text-xs">{branch}</Badge>}
+        <div className="flex min-w-0 items-center gap-1">{props.branchControls}</div>
         <div className="flex-1" />
         {actionResult && (
           <span
@@ -76,6 +78,11 @@ export function AppHeader(props: {
             {actionResult.message}
           </span>
         )}
+        <IconTip tip="Go to file (Ctrl+P)">
+          <Button variant="outline" size="icon" className="h-9 w-9" aria-label="Go to file" onClick={props.onQuickOpen}>
+            <Search size={16} />
+          </Button>
+        </IconTip>
         <IconTip tip="Agent (Ctrl+I)">
           <Button
             variant={props.agentOpen ? "default" : "outline"}

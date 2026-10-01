@@ -3,7 +3,9 @@ import type { ActionName, ActionPayload } from "@/lib/git/types"
 import { createRepoFile, removeFiles } from "../fs/files"
 import { HttpError } from "../http"
 import { resolveInRepo } from "../repo"
+import { createBranch, deleteBranch, switchBranch } from "./branches"
 import { git, isUnbornHead, output } from "./exec"
+import { stash, stashApply, stashDrop, stashPop } from "./stash"
 import { isUntracked } from "./status"
 import { addWorktree, removeWorktree } from "./worktree"
 
@@ -120,4 +122,11 @@ export const actions: Record<ActionName, ActionHandler> = {
 
   addWorktree,
   removeWorktree,
+  switchBranch,
+  createBranch,
+  deleteBranch,
+  stash,
+  stashPop,
+  stashApply,
+  stashDrop,
 }

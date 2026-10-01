@@ -6,6 +6,7 @@ import type { ActionPayload, Worktree, WorktreesResponse } from "@/lib/git/types
 import { allowAnyRepo } from "../config"
 import { HttpError } from "../http"
 import { git, output } from "./exec"
+import { requireNewBranchName, requireRef } from "./refs"
 
 export async function listWorktrees(repo: string): Promise<Worktree[]> {
   return parseWorktrees((await git(repo, ["worktree", "list", "--porcelain", "-z"])).stdout)
@@ -60,13 +61,6 @@ export async function isWorktreeOf(mainDir: string, dir: string): Promise<boolea
   return !!(await findWorktree(await listWorktrees(mainDir), dir))
 }
 
-function requireRef(value: string | undefined, what: string): string {
-  const ref = (value || "").trim()
-  if (!ref) throw new HttpError(400, `${what} is required`)
-  if (ref.startsWith("-")) throw new HttpError(400, `Invalid ${what.toLowerCase()}: ${ref}`)
-  return ref
-}
-
 // New worktrees must live next to the main worktree (inside its parent dir),
 // matching the default path the UI suggests.
 function requireWorktreePath(value: string | undefined, mainDir: string): string {
@@ -95,11 +89,7 @@ export async function addWorktree(repo: string, payload: ActionPayload): Promise
   const target = requireWorktreePath(payload.path, mainDir)
 
   if (payload.newBranch) {
-    try {
-      await git(mainDir, ["check-ref-format", "--branch", branch])
-    } catch {
-      throw new HttpError(400, `Invalid branch name: ${branch}`)
-    }
+    await requireNewBranchName(mainDir, branch)
     const base = requireRef(payload.base || "HEAD", "Base")
     await git(mainDir, ["worktree", "add", "-b", branch, "--", target, base])
   } else {

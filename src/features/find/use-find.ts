@@ -1,11 +1,14 @@
 import { useCallback, useMemo } from "react"
 import type { BufferEntry } from "@/features/buffer/buffer"
 import { isMarkdownFile } from "@/features/files/file-types"
+import { blameContent } from "@/lib/git/parse-blame"
 import { findMatches } from "./find"
 
 // The text the find bar searches — whatever the active view is showing.
 function searchText(entry: BufferEntry): string {
+  if (entry.commit) return ""
   if (entry.editMode) return entry.editContent
+  if (entry.viewMode === "blame") return entry.blame ? blameContent(entry.blame) : ""
   if (entry.fromAll) return entry.raw
   if (isMarkdownFile(entry.file) && entry.mdRender) return entry.raw
   if (entry.viewMode === "raw") return entry.raw

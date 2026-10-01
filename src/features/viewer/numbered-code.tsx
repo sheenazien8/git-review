@@ -1,20 +1,38 @@
-import type { ReactNode } from "react"
+import { useEffect, useRef, type ReactNode } from "react"
 import { Check } from "lucide-react"
 import { copyTitleFor, useCopyRange } from "@/features/clipboard/use-copy-range"
 import { cn } from "@/lib/utils"
 
 // Code block with a line-number gutter; clicking line numbers copies
-// "<fullPath>:<line>" (or a range, see useCopyRange).
-export function NumberedCode({ lineCount, fullPath, children }: {
+// "<fullPath>:<line>" (or a range, see useCopyRange). `target` scrolls to
+// and highlights a line (Quick Open "path:line").
+export function NumberedCode({ lineCount, fullPath, target, children }: {
   lineCount: number
   fullPath: string
+  target?: { line: number }
   children: ReactNode
 }) {
   const { copiedKey, anchor, click, rangePreview, setHover } = useCopyRange(fullPath)
+  const gutterRef = useRef<HTMLDivElement>(null)
+  const targetLine = target && target.line <= lineCount ? target.line : undefined
+
+  // Runs again when content (re)loads so the jump survives the async fetch.
+  useEffect(() => {
+    if (!target || target.line > lineCount) return
+    gutterRef.current?.children[target.line - 1]?.scrollIntoView({ block: "center" })
+  }, [target, lineCount])
 
   return (
-    <div className="flex text-xs font-mono" onMouseLeave={() => setHover(null)}>
-      <div className="shrink-0 select-none border-r border-border bg-muted/30 py-4 leading-5 text-muted-foreground">
+    <div className="relative flex text-xs font-mono" onMouseLeave={() => setHover(null)}>
+      {targetLine !== undefined && (
+        // py-4 (16px) + 20px rows, matching the gutter.
+        <div
+          aria-hidden
+          className="pointer-events-none absolute inset-x-0 h-5 bg-primary/10"
+          style={{ top: 16 + (targetLine - 1) * 20 }}
+        />
+      )}
+      <div ref={gutterRef} className="shrink-0 select-none border-r border-border bg-muted/30 py-4 leading-5 text-muted-foreground">
         {Array.from({ length: lineCount }, (_, i) => {
           const n = i + 1
           const key = `r-${n}`
@@ -30,6 +48,7 @@ export function NumberedCode({ lineCount, fullPath, children }: {
               className={cn(
                 "h-5 min-w-10 pl-3 pr-2 text-right cursor-pointer",
                 copied && "text-green-600 dark:text-green-400",
+                n === targetLine && "font-semibold text-foreground",
                 isAnchor ? "bg-primary! text-primary-foreground!" : inPreview ? "bg-primary/15!" : "hover:bg-accent"
               )}
             >

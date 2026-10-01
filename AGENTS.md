@@ -4,7 +4,7 @@
 
 ## OVERVIEW
 Project: **git-review**
-A local multi-repo Git review tool: a single-page Next.js app that runs `git` (via `child_process.execFile`, never a shell) against a repository chosen from `projects.json`. Features: staged/untracked file lists, unified/split/raw diffs, full-file content view (with syntax highlighting and optional Markdown rendering), filesystem file browser, staging/unstaging/commit/push actions, and an **agent chat panel** (ACP — Agent Client Protocol: the server spawns `claude-agent-acp` / `pi-acp` over stdio in the active repo). Deployable as a Dockerized installable PWA.
+A local multi-repo Git review tool: a single-page Next.js app that runs `git` (via `child_process.execFile`, never a shell) against a repository chosen from `projects.json`. Features: staged/untracked file lists, unified/split/raw diffs, full-file content view (with syntax highlighting and optional Markdown rendering), filesystem file browser, staging/unstaging/commit/push actions, blame, commit history + commit detail tabs, branch switching/creation/deletion, stash, merge-conflict resolution, and an **agent chat panel** (ACP — Agent Client Protocol: the server spawns `claude-agent-acp` / `pi-acp` over stdio in the active repo). Deployable as a Dockerized installable PWA.
 
 Stack: Next.js **16.3.4** (App Router, Turbopack) · React **19.2.8** · TypeScript **5** · Tailwind CSS **v4** (via `@tailwindcss/postcss`) · shadcn/ui (new-york style, Radix UI primitives) · lucide-react icons · Serwist **9** (PWA service worker) · react-markdown + remark-gfm + rehype-highlight + highlight.js (content rendering) · @agentclientprotocol/sdk (agent chat) · Vitest **5** · pnpm **11.8.0** · Docker (node:22-alpine, standalone output)
 
@@ -30,6 +30,7 @@ Layered: `app/` is routing only → `server/` (server-only git/fs logic) and `fe
 │   └── api/
 │       ├── auth/{login,logout,me}/route.ts
 │       ├── git/{status,diff,content,all-files,action,worktrees}/route.ts
+│       ├── git/{blame,log,commit,branches,stash}/route.ts   (diff also takes ?commit=<sha>)
 │       └── acp/{agents,sessions,action}/route.ts, acp/events/route.ts (SSE stream)
 │                               # Each: parse params → resolveRepo() → one server/ call → JSON.
 │                               #   Wrapped in withErrors() (HttpError → status, else 500 + git stderr).
@@ -44,6 +45,11 @@ Layered: `app/` is routing only → `server/` (server-only git/fs logic) and `fe
 │   ├── git/diff.ts             # getDiff(repo, { file, oldPath, side })
 │   ├── git/actions.ts          # `actions: Record<ActionName, handler>` — one fn per POST action
 │   ├── git/worktree.ts         # list/add/remove worktrees, mainWorktreeOf() (reads .git file, no git)
+│   ├── git/refs.ts             # requireRef / requireSha / requireNewBranchName / refExists (request validation)
+│   ├── git/blame.ts            # getBlame(repo, file, ref?) — working tree, or as of a sha
+│   ├── git/log.ts              # getLog (paged, --follow for a file), getCommit, getCommitDiff (vs first parent)
+│   ├── git/branches.ts         # listBranches, switch/create/deleteBranch actions
+│   ├── git/stash.ts            # listStashes, stash/stashPop/stashApply/stashDrop actions
 │   ├── fs/files.ts             # read/write/create/remove repo files (all path-guarded)
 │   ├── fs/walk.ts              # All Files walker + ignore-pattern matching
 │   └── acp/                    # agent chat: config.ts (acp.config.json), agent-process.ts (spawn +
@@ -54,9 +60,12 @@ Layered: `app/` is routing only → `server/` (server-only git/fs logic) and `fe
 │   ├── git/parse-status.ts     # porcelain v1 parser (one entry per staged/unstaged side)
 │   ├── git/parse-diff.ts       # unified diff → hunks
 │   ├── git/parse-worktrees.ts  # `git worktree list --porcelain -z` parser
+│   ├── git/parse-{blame,log,branches,stash}.ts  # parsers (+ the git --format strings they expect)
+│   ├── git/parse-conflict.ts   # conflict-marker parser + resolveConflict(content, i, ours|theirs|both)
 │   ├── acp/                    # agent chat contract (types.ts), transcript.ts (event log → chat items),
 │                               #   line-diff.ts (ACP diff → unified diff), permissions.ts, mentions.ts (@file parsing/ranking),
 │                               #   agent-config.ts (settings → toolbar controls, context usage)
+│   ├── time-ago.ts             # compact relative times ("5m", "2d")
 │   ├── api-client.ts           # `api.*` typed fetchers — the ONLY place that calls /api/git/* and /api/acp/*
 │   ├── auth.ts                 # JWT sign/verify, cookies, credentials from env
 │   └── utils.ts                # cn()
@@ -71,16 +80,23 @@ Layered: `app/` is routing only → `server/` (server-only git/fs logic) and `fe
 │   ├── viewer/                 # viewer-panel.tsx (toolbar), file-viewer.tsx (view switch),
 │   │                           #   diff/code/markdown/edit views, numbered-code.tsx, highlight-code.ts
 │   ├── find/                   # find.ts (pure engine), use-find.ts, find-bar.tsx, highlight-segments.tsx
+│   ├── quick-open/             # Ctrl/Cmd+P go-to-file palette: fuzzy.ts (pure ranker + path:line parse),
+│   │                           #   use-quick-open.ts, quick-open.tsx (Radix dialog)
 │   ├── files/                  # file-types.ts (binary/markdown/lang), status-display.tsx
 │   ├── clipboard/              # use-copy-range.ts (click-twice path:line range copy)
 │   ├── projects/projects.ts    # client copy of projects.json + ?project=&worktree= URL sync
 │   ├── worktrees/              # worktrees.ts (pure: default path, labels), use-worktrees.ts,
 │   │                           #   worktree-dialogs.tsx (add/remove)
+│   ├── history/                # use-history.ts (paged log for the History tab), history-list.tsx,
+│   │                           #   commit-detail.tsx + use-commit-diffs.ts (commit tab: lazy per-file diffs)
+│   ├── branches/               # use-branches.ts, branch-picker.tsx (header popover), branch-dialogs.tsx
+│   ├── stash/                  # use-stash.ts, stash-menu.tsx (header popover)
 │   ├── theme/theme.ts          # useTheme() over the .dark class
 │   └── agent/                  # use-agent.ts (session + EventSource), agent-frame.tsx (aside/sheet +
 │                               #   useAgentPanel, drag width), agent-panel.tsx, prompt-box.tsx
 │                               #   (@-mentions, action buttons, resizable), config-bar.tsx (model/thinking/mode…),
 │                               #   session-picker.tsx + use-session-list.ts (paged popover), chat-items.tsx
+├── src/hooks/use-popover.ts     # open state + outside-click/Escape for hand-rolled popovers
 ├── src/components/ui/          # shadcn/ui (badge, button, card, dialog, input, scroll-area,
 │                               #   separator, sheet, skeleton, tabs, tooltip)
 ├── src/**/*.test.ts, test/     # Vitest; test/git-repo.ts creates throwaway git repos
@@ -132,6 +148,14 @@ Vitest (`vitest.config.mts`, node env). Unit tests sit next to the code (`*.test
 *   **all-files browser** (`server/fs/walk.ts`): walks with `readdir`/`stat`, ignore patterns = global `ignore.config.json` (hardcoded fallback if missing/malformed) ∪ per-project `"ignore"`. Pattern syntax: bare name = any path segment; `*.ext` = suffix; `name*` = prefix; `a/b` = path prefix.
 *   **Worktrees**: the app tracks `projectDir` (selector, from projects.json) and `repoPath` (the worktree every API call targets). `addWorktree`/`removeWorktree` are actions; worktree commands run from the main worktree. New worktree paths must be absolute and inside the main worktree's parent dir (UI default `<parent>/<repo>-<branch-slug>`), unless `GIT_REVIEW_ALLOW_ANY_REPO=1`.
 *   **Tabs** (`features/buffer/`): persisted per repo under `git-review-tabs-<base64 repo>` (list + active id only; content is re-fetched). `useBuffer` keeps a synchronous in-flight `Set` ref so rapid clicks don't queue duplicate fetches, and re-fetches the active tab once status has loaded (rename hints need `files`).
+*   **Advanced git** — plan `docs/plan/23-advanced-git-features.md`:
+    *   **Blame** is a view mode (`viewMode: "blame"`, available on every file tab); click a sha to open that commit.
+    *   **Commit tabs**: buffer entries with `commit` set (`file` is ""), id `<repo>::commit::<sha>`. Opened from History, blame, stash ("show changes") and parent links. Diffs are against the **first parent** (stash commits therefore show the stashed tracked changes; untracked files in a stash aren't shown). Find is disabled there.
+    *   **History** is the 4th sidebar tab (tabs are controlled by the app so "file history" — toolbar button or right-click a file in any tree — can switch to it). Loads lazily, 50 commits per page, infinite scroll.
+    *   Shas from requests must be hex (`requireSha`) — no ref expressions. Branch names go through `requireRef` (no leading "-") and `check-ref-format` for new ones.
+    *   **switchBranch** refuses (409) with tracked changes unless `stash: true`; the UI asks first ("Stash & Switch"). Remote branches ("origin/x") switch via `switch --track`, or to the existing local branch of the same name.
+    *   **Conflicts**: porcelain unmerged codes (UU/AA/DU/…) → one `status: "conflicted"`, unstaged entry. Their diff is a combined diff, so `fetchEntry` also loads raw content and the viewer shows the conflict view (current | incoming panes, base in diff3 style). Resolutions live in `editContent`/`dirty` (like edit mode) until Save; "Mark resolved" = `add`.
+*   **Quick Open** (`features/quick-open/`, plan `docs/plan/25-quick-open-file-picker.md`): Ctrl/Cmd+P (also the header search button) fuzzy-finds over `repoFiles` (All Files minus git-ignored) ∪ changed files; empty query = open tabs then changed files. It's separate from the sidebar search input, which stays a tree/History filter. While it's open the global shortcut handler ignores keys. `path:42` opens the file raw (All Files tab) with `BufferEntry.gotoLine`, which `NumberedCode` scrolls to/highlights (CodeView only).
 *   **Dark mode**: persisted in `localStorage` under key `git-review-dark`. The `.dark` class is applied **pre-hydration** by an inline script in `layout.tsx` (localStorage → falls back to `prefers-color-scheme`), so there is no theme flash. `useTheme()` (`features/theme/theme.ts`) reads it via `useSyncExternalStore` and writes `localStorage` + toggles the class. Keep the key in sync with `layout.tsx`.
 *   **React compiler lint** (`react-hooks/refs`): don't return a ref inside an object you then read during render — destructure it (see `useFullscreen` in `viewer-panel.tsx`).
 *   **PWA**: Serwist wraps `next.config.ts` (`withSerwist` from `@serwist/turbopack`); worker source is `src/app/sw.ts` (precache + `defaultCache` runtime caching, `skipWaiting`/`clientsClaim`); compiled to `public/sw.js`. `manifest.webmanifest` is served via `src/app/manifest.ts`. `output: "standalone"` is required for the slim Docker image.

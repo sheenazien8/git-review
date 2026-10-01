@@ -29,12 +29,15 @@ export function useEditing({ repoPath, buffer, files, loadStatus, setActionResul
       return
     }
     if (!canEdit(active.file)) return
-    const content = !active.raw || active.rawError ? await fetchRaw(active) : active.raw
+    // Unsaved conflict resolutions carry over into the editor.
+    const content = active.dirty
+      ? active.editContent
+      : !active.raw || active.rawError ? await fetchRaw(active) : active.raw
     update(active.id, {
       viewMode: "split",
       editMode: true,
       editContent: content,
-      dirty: false,
+      dirty: active.dirty,
       mdRender: false,
       findOpen: false,
     })

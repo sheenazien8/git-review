@@ -1,5 +1,5 @@
 import type { ReactNode } from "react"
-import { RefreshCw, X } from "lucide-react"
+import { GitCommitHorizontal, RefreshCw, X } from "lucide-react"
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip"
 import { basename } from "@/features/files/file-types"
 import { statusIcon } from "@/features/files/status-display"
@@ -38,6 +38,11 @@ export function TabBar({ entries, activeId, files, onActivate, onRefresh, onClos
         const isActive = entry.id === activeId
         const status = files.find(f => f.path === entry.file && f.staged === entry.staged)?.status
           ?? (entry.fromAll ? "untracked" : "modified")
+        const subject = entry.commitData?.commit.subject
+        const label = entry.commit ? subject || entry.commit.slice(0, 7) : basename(entry.file)
+        const tip = entry.commit
+          ? `Commit ${entry.commit.slice(0, 10)}${subject ? ` — ${subject}` : ""}`
+          : `${entry.file}${entry.staged ? " (staged)" : ""}${entry.fromAll ? " (from All Files)" : ""}`
         return (
           <div
             key={entry.id}
@@ -49,10 +54,10 @@ export function TabBar({ entries, activeId, files, onActivate, onRefresh, onClos
               isActive ? "border-primary/40 bg-primary/10 text-foreground" : "border-transparent text-muted-foreground hover:bg-accent hover:text-accent-foreground"
             )}
           >
-            <Tip tip={<p className="text-xs">{entry.file}{entry.staged ? " (staged)" : ""}{entry.fromAll ? " (from All Files)" : ""}</p>}>
+            <Tip tip={<p className="text-xs">{tip}</p>}>
               <button type="button" onClick={() => onActivate(entry.id)} className="flex min-w-0 items-center gap-1.5 text-left">
-                <span className="shrink-0">{statusIcon(status)}</span>
-                <span className="max-w-40 truncate">{basename(entry.file)}</span>
+                <span className="shrink-0">{entry.commit ? <GitCommitHorizontal size={14} /> : statusIcon(status)}</span>
+                <span className="max-w-40 truncate">{label}</span>
                 {entry.dirty && <span className="size-1.5 shrink-0 rounded-full bg-amber-500" aria-label="Unsaved changes" />}
                 {entry.diffLoading && <RefreshCw size={11} className="shrink-0 animate-spin text-muted-foreground" />}
               </button>
@@ -60,7 +65,7 @@ export function TabBar({ entries, activeId, files, onActivate, onRefresh, onClos
             <Tip tip="Refresh">
               <button
                 type="button"
-                aria-label={`Refresh ${entry.file}`}
+                aria-label={`Refresh ${entry.commit ? label : entry.file}`}
                 disabled={entry.diffLoading}
                 onClick={e => { e.stopPropagation(); onRefresh(entry) }}
                 className="flex h-5 w-5 shrink-0 items-center justify-center rounded text-muted-foreground hover:bg-accent hover:text-foreground disabled:opacity-40"
@@ -71,7 +76,7 @@ export function TabBar({ entries, activeId, files, onActivate, onRefresh, onClos
             <Tip tip="Close tab">
               <button
                 type="button"
-                aria-label={`Close ${entry.file}`}
+                aria-label={`Close ${entry.commit ? label : entry.file}`}
                 onClick={e => { e.stopPropagation(); onClose(entry) }}
                 className="flex h-5 w-5 shrink-0 items-center justify-center rounded text-muted-foreground hover:bg-destructive hover:text-destructive-foreground"
               >

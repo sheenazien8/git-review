@@ -62,25 +62,48 @@ export function useBuffer(repoPath: string, statusLoading: boolean) {
     }
   }, [repoPath, update])
 
+  const fetchBlame = useCallback(async (entry: BufferEntry) => {
+    try {
+      update(entry.id, { blame: await api.blame(repoPath, entry.file), blameError: "" })
+    } catch (e) {
+      update(entry.id, { blame: null, blameError: e instanceof Error ? e.message : "Failed to load blame" })
+    }
+  }, [repoPath, update])
+
+  const fetchCommit = useCallback(async (entry: BufferEntry, sha: string) => {
+    try {
+      update(entry.id, { commitData: await api.commit(repoPath, sha), commitError: "" })
+    } catch (e) {
+      update(entry.id, { commitData: null, commitError: e instanceof Error ? e.message : "Failed to load commit" })
+    }
+  }, [repoPath, update])
+
   // Fetches the diff and (when needed) raw content for the entry. Entries
   // opened from All Files always pull raw content; entries with a diff only
-  // pull raw when the user has switched to raw view mode.
+  // pull raw when the user has switched to raw view mode, or when the file is
+  // unmerged (a combined diff) — the conflict view works on the file itself.
+  // Commit tabs load the commit instead.
   const fetchEntry = useCallback(async (entry: BufferEntry) => {
     inFlightRef.current.add(entry.id)
     update(entry.id, { diffLoading: true })
     try {
+      if (entry.commit) {
+        await fetchCommit(entry, entry.commit)
+        return
+      }
       const diff = entry.fromAll ? "" : await api.diff(repoPath, entry.file, entry.staged, entry.oldPath)
       update(entry.id, { diff })
-      if (entry.fromAll || entry.viewMode === "raw") {
+      if (entry.fromAll || entry.viewMode === "raw" || isUnmergedDiff(diff)) {
         await fetchRaw(entry)
       }
+      if (entry.viewMode === "blame") await fetchBlame(entry)
     } catch {
       update(entry.id, { diff: "" })
     } finally {
       inFlightRef.current.delete(entry.id)
       update(entry.id, { diffLoading: false })
     }
-  }, [repoPath, fetchRaw, update])
+  }, [repoPath, fetchRaw, fetchBlame, fetchCommit, update])
 
   const loadMarkdown = useCallback(async (entry: BufferEntry) => {
     try {
@@ -93,7 +116,7 @@ export function useBuffer(repoPath: string, statusLoading: boolean) {
   // Opens a new tab or activates the existing one; either way the content is
   // re-fetched so the user always sees the file's current state.
   const open = useCallback((key: TabKey) => {
-    const id = makeTabId(repoPath, key.file, key.staged, key.fromAll)
+    const id = makeTabId(repoPath, key)
     const existing = entries.find(b => b.id === id)
     // In-flight guard: the ref covers rapid clicks within one event tick, the
     // entry flag covers clicks separated by a render.
@@ -103,8 +126,10 @@ export function useBuffer(repoPath: string, statusLoading: boolean) {
     }
     const target = existing ?? newEntry(repoPath, key)
     dispatch({ type: "open", entry: target })
+    // Re-opening a commit from another file's history focuses that file.
+    if (existing && key.commitFile && existing.commitFile !== key.commitFile) update(id, { commitFile: key.commitFile })
     void fetchEntry(target)
-  }, [entries, repoPath, activate, fetchEntry])
+  }, [entries, repoPath, activate, fetchEntry, update])
 
   // Re-fetches an entry's content (the tab's refresh button).
   const refresh = useCallback((entry: BufferEntry) => {
@@ -140,9 +165,16 @@ export function useBuffer(repoPath: string, statusLoading: boolean) {
     update,
     restore,
     fetchRaw,
+    fetchBlame,
     fetchEntry,
     loadMarkdown,
   }
+}
+
+// `git diff` of an unmerged path is a combined diff ("diff --cc"), or just
+// "* Unmerged path <file>" when one side deleted it.
+function isUnmergedDiff(diff: string) {
+  return /^(diff --cc |\* Unmerged path )/m.test(diff)
 }
 
 export type Buffer = ReturnType<typeof useBuffer>
